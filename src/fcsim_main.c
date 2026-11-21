@@ -254,7 +254,8 @@ static struct fcsim_nexus *fcsim_nexus_find(struct fcsim_iport *iport,
 static bool fcsim_nexus_wanted(struct fcsim_nexus *nexus)
 {
 	return nexus->iport->link_up && !nexus->iport->removing &&
-	       fcsim_tport_online(nexus->tport) && !READ_ONCE(nexus->closing);
+	       fcsim_tport_online(nexus->tport) && !READ_ONCE(nexus->closing) &&
+	       fcsim_zone_allows(nexus->iport->wwpn, nexus->tport->wwpn);
 }
 
 /* PLOGI/PRLI equivalent. */
@@ -396,8 +397,10 @@ static void fcsim_reconcile(void)
 		tport->rscn_online = online;
 		/* A new appearance of the port: report refusals afresh. */
 		fcsim_forget_refusals(NULL, tport);
+		/* Like a switch, only to the initiators zoned with it. */
 		list_for_each_entry(iport, &fcsim_iports, node)
-			if (iport->link_up && !iport->removing)
+			if (iport->link_up && !iport->removing &&
+			    fcsim_zone_allows(iport->wwpn, tport->wwpn))
 				fcsim_post_rscn(iport, tport->port_id);
 	}
 
@@ -409,7 +412,8 @@ static void fcsim_reconcile(void)
 		list_for_each_entry(tport, &fcsim_tports, node) {
 			if (!fcsim_tport_online(tport))
 				continue;
-			if (fcsim_nexus_find(iport, tport) ||
+			if (!fcsim_zone_allows(iport->wwpn, tport->wwpn) ||
+			    fcsim_nexus_find(iport, tport) ||
 			    fcsim_pair_draining(iport, tport))
 				continue;
 			fcsim_login(iport, tport);

@@ -265,6 +265,11 @@ extern const struct config_item_type fcsim_faults_type;
 bool fcsim_fault_eval(struct fcsim_iport *iport, u64 tport_wwpn, bool tmr,
 		      struct fcsim_fault_action *act);
 
+/* fcsim_zone.c: zoning */
+int fcsim_zone_init(struct config_group *root);
+void fcsim_zone_exit(void);
+bool fcsim_zone_allows(u64 iwwpn, u64 twwpn);
+
 /* fcsim_cfs.c: /sys/kernel/config/fcsim */
 int fcsim_cfs_init(void);
 void fcsim_cfs_exit(void);

@@ -191,6 +191,32 @@ fc_host の統計（`/sys/class/fc_host/hostN/statistics/`）は iport ごとの
 `fc_xid_not_found`（終了済みのエクスチェンジに届いた応答）、`seconds_since_last_reset`。物理層のエラー類は 0。
 `reset_statistics` はその時点の値を基準として記録する。
 
+### ゾーニング
+
+単一の仮想スイッチ上の WWN ゾーニング。LIO の ACL（target 側の LUN マスキング）とは別の層で、
+許可されない組はログイン自体が起きない。
+
+```
+/sys/kernel/config/fcsim/
+  zoning/
+    mode       off | on        編集用（commit で反映）。off は全対全
+    commit     (wo) 1 を書くと、編集中の構成（mode と zones/）をまとめて有効にする
+    pending    (ro) 1: 編集中の構成が有効な構成と違う
+    active     (ro, バイナリ属性で 1 ページを超えても読める) 有効な構成:
+                 mode <off|on>
+                 zone <name> <wwpn> <wwpn> ...
+  zones/<name>/
+    members    編集用。WWPN を空白・改行・カンマ区切りで（1 回の write で全置換、最大 128）
+```
+
+- mode on のとき、initiator と target は同じゾーンに入っていればログインできる（「あるべき nexus」の条件に追加）
+- 編集はファブリックに影響しない。commit で不変なコピーを作って差し替え、reconcile を 1 回だけ走らせる
+- RSCN: commit で見え方が変わった（ゾーンに入った・外れた）組の initiator に、その target の port_id で送る。
+  target ポートの参加・離脱の RSCN も、そのポートとゾーンを共有する initiator にだけ送る（実機のスイッチと同じ）
+- configfs は 1 回の write() を 1 回の store として扱うので、`members` は 1 回で書くこと
+  （`printf '%s\n' a b > members` のように行ごとに write されると最後の 1 つだけが残る）。`fcsimctl` は 1 回で書く
+- 取り消し（revert）は CLI が `active` を読んで `zones/` を作り直す
+
 ### initiator 側 CLI（`tools/fcsimctl`）
 
 configfs を直接触らずに操作するための Python スクリプト（追加依存なし）。
@@ -202,7 +228,10 @@ fcsimctl link <wwpn> up|down
 fcsimctl lip <wwpn>
 fcsimctl fault list | set <i> <t|any> attr=value... | clear <i> [<t|any>]
 fcsimctl stats <wwpn> [--reset]
-fcsimctl save|restore <file.json>           host・link・障害ルール（target 側は fcsim-targetctl で別に）
+fcsimctl zone list | create <name> [wwpn...] | delete <name> | add|remove <name> <wwpn>...
+fcsimctl zone mode on|off | commit | revert
+fcsimctl save|restore <file.json>           ゾーニング（編集中の構成）・host・link・障害ルール
+                                            （target 側は fcsim-targetctl で別に。restore は最後に commit）
 fcsimctl clear
 ```
 
@@ -237,6 +266,7 @@ src/
   fcsim_tgt.c     target_core_fabric_ops、LIO configfs（wwn/tpg/attrib/acl）
   fcsim_cfs.c     独自 configfs（/sys/kernel/config/fcsim）
   fcsim_fault.c   障害注入ルール（hosts/<wwpn>/faults）
+  fcsim_zone.c    ゾーニング（zoning/、zones/）
 tools/fcsim-targetcli, fcsim-targetctl, fcsim_rtslib.py   targetcli 連携
 tools/fcsimctl                                            initiator 側・ファブリックの CLI
 scripts/run-guest-test.sh   ゲストでテストを 1 本実行し、出力と dmesg を .test-out/ に残す
@@ -256,6 +286,7 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test で
                                              （要 device-mapper-multipath、カーネルに SCSI_DH_ALUA / DM_MULTIPATH_ST）
   misc-fcsim.sh                              拒否ログの抑制、1 ページを超える一覧、TPG 属性
   cli-fcsim.sh                               fcsimctl（作成・障害ルール・status・save/restore）と fc_host 統計
+  zone-fcsim.sh                              ゾーニング（ステージングと commit、RSCN の宛先、revert、save/restore）
 ```
 
 ## 7. 段階
@@ -264,7 +295,7 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test で
 |---|---|
 | 1 (MVP) | 単一ファブリック・全対全、iport/tport、ログイン、rport・スキャン、READ/WRITE、link up/down、ABORT/LUN RESET、KASAN/lockdep 有効で作成〜削除〜rmmod がクリーン |
 | 2（済） | エクスチェンジ化、非同期 drain、TMR タイムアウト、target/host reset、`terminate_rport_io`（fast_io_fail_tmo）、障害注入（遅延・無応答・エラー応答）、RSCN、multipath テスト（2 iport × 2 tport） |
-| 3 | `docs/stage3-plan.md` を参照。3a（済）: initiator 側 CLI、fc_host 統計。以降: 互換（WSL2 / AlmaLinux 9）、ゾーニング、NPIV |
+| 3 | `docs/stage3-plan.md` を参照。3a（済）: initiator 側 CLI、fc_host 統計。互換（済）: WSL2 / AlmaLinux 9、DKMS RPM。3b（済）: ゾーニング。以降: NPIV |
 
 ## 8. 既知の制限
 

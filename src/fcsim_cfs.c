@@ -10,6 +10,7 @@
  *       link                               (rw: up / down)
  *       draining                           (ro) logged-out sessions not yet drained
  *       faults/<target WWPN | any>/        fault injection rules (fcsim_fault.c)
+ *   zoning/, zones/                        zoning (fcsim_zone.c)
  */
 #define pr_fmt(fmt) "tcm_fcsim: " fmt
 
@@ -235,13 +236,20 @@ int fcsim_cfs_init(void)
 				    &fcsim_hosts_type);
 	configfs_add_default_group(&fcsim_hosts_group, &fcsim_subsys.su_group);
 
-	ret = configfs_register_subsystem(&fcsim_subsys);
+	ret = fcsim_zone_init(&fcsim_subsys.su_group);	/* zoning/, zones/ */
 	if (ret)
+		return ret;
+
+	ret = configfs_register_subsystem(&fcsim_subsys);
+	if (ret) {
 		pr_err("configfs_register_subsystem failed: %d\n", ret);
+		fcsim_zone_exit();
+	}
 	return ret;
 }
 
 void fcsim_cfs_exit(void)
 {
 	configfs_unregister_subsystem(&fcsim_subsys);
+	fcsim_zone_exit();
 }

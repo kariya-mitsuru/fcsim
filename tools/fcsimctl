@@ -15,6 +15,13 @@ tools/fcsim-targetcli and tools/fcsim-targetctl.
                      [probability=N] [count=N]
   fcsimctl fault clear <initiator> [<target|any>]
   fcsimctl stats <wwpn> [--reset]
+  fcsimctl zone list
+  fcsimctl zone create <name> [<wwpn>...] | delete <name>
+  fcsimctl zone add|remove <name> <wwpn>...
+  fcsimctl zone mode on|off
+  fcsimctl zone commit | revert
+                     zone edits and mode are staged; commit makes them
+                     active at once, revert discards them
   fcsimctl save <file.json>
   fcsimctl restore <file.json>
   fcsimctl clear
@@ -33,6 +40,8 @@ import sys
 
 CFS = "/sys/kernel/config/fcsim"
 HOSTS = CFS + "/hosts"
+ZONING = CFS + "/zoning"
+ZONES = CFS + "/zones"
 LIO_FABRIC = "/sys/kernel/config/target/fcsim"
 FAULT_ATTRS = ("delay_ms", "drop", "error", "probability", "count")
 FAULT_DEFAULTS = {"delay_ms": "0", "drop": "none", "error": "none",
@@ -169,6 +178,7 @@ def fabric_state():
     return {
         "fabric_name": read(CFS + "/fabric_name"),
         "version": read(CFS + "/version"),
+        "zoning": zoning_state(),
         "hosts": [host_state(w) for w in host_wwpns()],
         "targets": target_state(),
     }
@@ -184,6 +194,13 @@ def cmd_status(args):
         print()
         return
     print("fabric %s (tcm_fcsim %s)" % (st["fabric_name"], st["version"]))
+    zs = st["zoning"]
+    print("zoning: %s, %d zone(s)%s" % (
+        zs["active"]["mode"], len(zs["active"]["zones"]),
+        "  (uncommitted changes: fcsimctl zone list)" if zs["pending"] else ""))
+    if zs["active"]["mode"] == "on":
+        for name, members in zs["active"]["zones"].items():
+            print("  %s: %s" % (name, " ".join(members) or "(empty)"))
     print()
     print("target ports:")
     if not st["targets"]:
@@ -319,6 +336,118 @@ def cmd_stats(args):
         print("%-28s %s" % (name, v))
 
 
+# ------------------------------------------------------------------ zoning
+
+def staged_zones():
+    """{name: [wwpn...]} of the staged zones."""
+    return {os.path.basename(z): lines(z + "/members")
+            for z in sorted(glob.glob(ZONES + "/*"))}
+
+
+def active_zoning():
+    """(mode, {name: [wwpn...]}) of the active configuration."""
+    mode, zones = "off", {}
+    for l in read(ZONING + "/active").splitlines():
+        f = l.split()
+        if not f:
+            continue
+        if f[0] == "mode":
+            mode = f[1]
+        elif f[0] == "zone":
+            zones[f[1]] = f[2:]
+    return mode, zones
+
+
+def zoning_state():
+    mode, zones = active_zoning()
+    return {
+        "active": {"mode": mode, "zones": zones},
+        "staged": {"mode": read(ZONING + "/mode"), "zones": staged_zones()},
+        "pending": read(ZONING + "/pending") == "1",
+    }
+
+
+def zone_dir(name, must_exist=True):
+    d = os.path.join(ZONES, name)
+    if must_exist and not os.path.isdir(d):
+        raise Error("no such zone: %s" % name)
+    return d
+
+
+def zone_set_members(name, members):
+    write(zone_dir(name) + "/members", "\n".join(members) + "\n")
+
+
+def zone_create(name, members=()):
+    d = zone_dir(name, must_exist=False)
+    if os.path.isdir(d):
+        raise Error("zone exists: %s" % name)
+    try:
+        os.mkdir(d)
+    except OSError as e:
+        raise Error("mkdir %s: %s" % (d, e.strerror))
+    if members:
+        zone_set_members(name, members)
+
+
+def zones_replace_staged(mode, zones):
+    """Make the staged configuration exactly (mode, zones)."""
+    for name in staged_zones():
+        if name not in zones:
+            os.rmdir(zone_dir(name))
+    have = staged_zones()
+    for name, members in zones.items():
+        if name not in have:
+            zone_create(name)
+        zone_set_members(name, [wwn(m) for m in members])
+    write(ZONING + "/mode", mode)
+
+
+def zone_commit():
+    write(ZONING + "/commit", "1")
+
+
+def cmd_zone(args):
+    check_loaded()
+    a, rest = args.action, args.args
+    if a == "list":
+        st = zoning_state()
+        for which in ("active", "staged"):
+            z = st[which]
+            print("%s: mode %s" % (which, z["mode"]))
+            for name, members in z["zones"].items():
+                print("  %s: %s" % (name, " ".join(members) or "(empty)"))
+        print("pending: %s" % ("yes" if st["pending"] else "no"))
+    elif a in ("create", "delete", "add", "remove"):
+        if not rest:
+            raise Error("zone %s: zone name required" % a)
+        name, members = rest[0], [wwn(m) for m in rest[1:]]
+        if a == "create":
+            zone_create(name, members)
+        elif a == "delete":
+            os.rmdir(zone_dir(name))
+        else:
+            if not members:
+                raise Error("zone %s: WWPNs required" % a)
+            cur = lines(zone_dir(name) + "/members")
+            if a == "add":
+                cur += [m for m in members if m not in cur]
+            else:
+                cur = [m for m in cur if m not in members]
+            zone_set_members(name, cur)
+    elif a == "mode":
+        if rest not in (["on"], ["off"]):
+            raise Error("zone mode on|off")
+        write(ZONING + "/mode", rest[0])
+    elif a == "commit":
+        zone_commit()
+    elif a == "revert":
+        mode, zones = active_zoning()
+        zones_replace_staged(mode, zones)
+    else:
+        raise Error("unknown zone action: %s" % a)
+
+
 def saved_config():
     hosts = []
     for w in host_wwpns():
@@ -330,7 +459,11 @@ def saved_config():
             "faults": [{k: f[k] for k in ("target",) + FAULT_ATTRS}
                        for f in h["faults"]],
         })
-    return {"version": SAVE_VERSION, "hosts": hosts}
+    return {
+        "version": SAVE_VERSION,
+        "zoning": {"mode": read(ZONING + "/mode"), "zones": staged_zones()},
+        "hosts": hosts,
+    }
 
 
 def cmd_save(args):
@@ -346,6 +479,8 @@ def cmd_save(args):
 def clear_all():
     for w in host_wwpns():
         host_delete(w)
+    zones_replace_staged("off", {})
+    zone_commit()
 
 
 def cmd_clear(args):
@@ -360,6 +495,10 @@ def cmd_restore(args):
     if cfg.get("version") != SAVE_VERSION:
         raise Error("unsupported config version: %r" % cfg.get("version"))
     clear_all()
+    # Zoning first, so that the hosts log in under it from the start.
+    z = cfg.get("zoning", {})
+    zones_replace_staged(z.get("mode", "off"), z.get("zones", {}))
+    zone_commit()
     for h in cfg.get("hosts", []):
         w = wwn(h["wwpn"])
         # A new host logs in right away; take the link down while the fault
@@ -411,7 +550,13 @@ def main():
     s.add_argument("--reset", action="store_true")
     s.set_defaults(func=cmd_stats)
 
-    s = sub.add_parser("save", help="save hosts, links and fault rules as JSON")
+    s = sub.add_parser("zone", help="zoning (staged; commit to apply)")
+    s.add_argument("action", choices=("list", "create", "delete", "add", "remove",
+                                      "mode", "commit", "revert"))
+    s.add_argument("args", nargs="*", metavar="arg")
+    s.set_defaults(func=cmd_zone)
+
+    s = sub.add_parser("save", help="save zoning, hosts, links and fault rules as JSON")
     s.add_argument("file")
     s.set_defaults(func=cmd_save)
 
@@ -419,7 +564,7 @@ def main():
     s.add_argument("file")
     s.set_defaults(func=cmd_restore)
 
-    s = sub.add_parser("clear", help="delete all initiator ports and fault rules")
+    s = sub.add_parser("clear", help="delete all initiator ports, fault rules and zones")
     s.set_defaults(func=cmd_clear)
 
     args = p.parse_args()

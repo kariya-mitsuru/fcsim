@@ -5,7 +5,7 @@ FC HBA なしで「FC ストレージ」をエミュレーションする Linux 
 - initiator 側には本物の FC HBA と同じく `/sys/class/fc_host`・`fc_remote_ports`・`fc_transport` が現れ、
   LUN は普通の SCSI ディスク（`/dev/sdX`）として見える
 - target 側は LIO の fabric module（`fcsim`）なので、LUN・ACL は targetcli で管理できる
-- 両者を同じモジュール内の仮想ファブリックでつなぐ。リンクの上げ下げ、障害注入（遅延・無応答・エラー）、
+- 両者を同じモジュール内の仮想ファブリックでつなぐ。リンクの上げ下げ、ゾーニング、障害注入（遅延・無応答・エラー）、
   RSCN、fc_host 統計があり、dm-multipath / multipathd と組み合わせて試せる
 
 設計は `docs/design.md`、今後の計画は `docs/stage3-plan.md`。
@@ -65,7 +65,12 @@ sudo tools/fcsimctl status
 sudo tools/fcsimctl fault set 10:00:00:00:c9:00:00:01 21:00:00:00:00:00:00:01 delay_ms=100
 sudo tools/fcsimctl link 10:00:00:00:c9:00:00:01 down
 
-# 保存・復元（target 側は fcsim-targetctl、initiator 側は fcsimctl）
+# ゾーニング（編集してから commit で一括反映）
+sudo tools/fcsimctl zone create z1 10:00:00:00:c9:00:00:01 21:00:00:00:00:00:00:01
+sudo tools/fcsimctl zone mode on
+sudo tools/fcsimctl zone commit
+
+# 保存・復元（target 側は fcsim-targetctl、initiator 側とゾーニングは fcsimctl）
 sudo tools/fcsim-targetctl save /etc/target/fcsim-target.json
 sudo tools/fcsimctl save /etc/target/fcsim-initiator.json
 
