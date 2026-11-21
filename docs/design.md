@@ -217,6 +217,27 @@ fc_host の統計（`/sys/class/fc_host/hostN/statistics/`）は iport ごとの
   （`printf '%s\n' a b > members` のように行ごとに write されると最後の 1 つだけが残る）。`fcsimctl` は 1 回で書く
 - 取り消し（revert）は CLI が `active` を読んで `zones/` を作り直す
 
+### FPIN（Fabric Performance Impact Notification）
+
+ファブリック（スイッチ）が送る通知を、ユーザ空間の指示で発生させる。
+
+```
+/sys/kernel/config/fcsim/fpin   (wo) 1 回の write で 1 通知
+  li <wwpn> [event] [count=N] [threshold=ms]     Link Integrity（そのポートのリンクにエラー）
+  pn <wwpn> [event] [period=ms]                  Peer Congestion（そのポートが輻輳）
+  dn <wwpn> [reason]                             Delivery（そのポートとのフレームが破棄された）
+  cn <initiator wwpn> [event] [severity=warning|error] [period=ms]   その initiator 自身のリンクの輻輳
+```
+
+- 宛先: target ポートについての通知は、link up でそのポートとゾーンを共有する全 initiator へ。
+  initiator ポートについての通知は、そのポートだけへ
+- 実際の ELS FPIN と同じ形のペイロードを組み、`fc_host_fpin_rcv()` に渡す。FC transport が fc_host / rport の
+  `statistics/fpin_*` を数え、FC netlink イベント（`FCH_EVT_LINK_FPIN`）として流す
+- LI / PN の port name list には対象ポート自身を入れる（multipathd はこのリストだけを見る。
+  カーネルは attached port と同じものを重複して数えない）。detecting port は対象ポートがつながる仮想スイッチのポート
+- multipathd の `marginal_pathgroups fpin` は LI を受けると該当パスを marginal にし（rport の `port_state` を
+  `Marginal` に書き換える）、別のパスグループへ移す。そのホストの LINKUP / RSCN で元に戻す
+
 ### initiator 側 CLI（`tools/fcsimctl`）
 
 configfs を直接触らずに操作するための Python スクリプト（追加依存なし）。
@@ -230,6 +251,7 @@ fcsimctl fault list | set <i> <t|any> attr=value... | clear <i> [<t|any>]
 fcsimctl stats <wwpn> [--reset]
 fcsimctl zone list | create <name> [wwpn...] | delete <name> | add|remove <name> <wwpn>...
 fcsimctl zone mode on|off | commit | revert
+fcsimctl fpin li|pn|dn|cn <wwpn> [event] [key=value...]
 fcsimctl save|restore <file.json>           ゾーニング（編集中の構成）・host・link・障害ルール
                                             （target 側は fcsim-targetctl で別に。restore は最後に commit）
 fcsimctl clear
@@ -267,6 +289,7 @@ src/
   fcsim_cfs.c     独自 configfs（/sys/kernel/config/fcsim）
   fcsim_fault.c   障害注入ルール（hosts/<wwpn>/faults）
   fcsim_zone.c    ゾーニング（zoning/、zones/）
+  fcsim_fpin.c    ファブリックからの FPIN（fpin）
 tools/fcsim-targetcli, fcsim-targetctl, fcsim_rtslib.py   targetcli 連携
 tools/fcsimctl                                            initiator 側・ファブリックの CLI
 scripts/run-guest-test.sh   ゲストでテストを 1 本実行し、出力と dmesg を .test-out/ に残す
@@ -287,6 +310,7 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test で
   misc-fcsim.sh                              拒否ログの抑制、1 ページを超える一覧、TPG 属性
   cli-fcsim.sh                               fcsimctl（作成・障害ルール・status・save/restore）と fc_host 統計
   zone-fcsim.sh                              ゾーニング（ステージングと commit、RSCN の宛先、revert、save/restore）
+  fpin-fcsim.sh                              FPIN の宛先・統計・netlink、multipathd の marginal_pathgroups fpin
 ```
 
 ## 7. 段階
@@ -295,7 +319,7 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test で
 |---|---|
 | 1 (MVP) | 単一ファブリック・全対全、iport/tport、ログイン、rport・スキャン、READ/WRITE、link up/down、ABORT/LUN RESET、KASAN/lockdep 有効で作成〜削除〜rmmod がクリーン |
 | 2（済） | エクスチェンジ化、非同期 drain、TMR タイムアウト、target/host reset、`terminate_rport_io`（fast_io_fail_tmo）、障害注入（遅延・無応答・エラー応答）、RSCN、multipath テスト（2 iport × 2 tport） |
-| 3 | `docs/stage3-plan.md` を参照。3a（済）: initiator 側 CLI、fc_host 統計。互換（済）: WSL2 / AlmaLinux 9、DKMS RPM。3b（済）: ゾーニング。以降: NPIV |
+| 3 | `docs/stage3-plan.md` を参照。3a（済）: initiator 側 CLI、fc_host 統計。互換（済）: WSL2 / AlmaLinux 9、DKMS RPM。3b（済）: ゾーニング。G（済）: FPIN。保留: NPIV |
 
 ## 8. 既知の制限
 

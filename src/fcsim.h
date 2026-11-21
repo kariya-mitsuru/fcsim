@@ -270,6 +270,9 @@ int fcsim_zone_init(struct config_group *root);
 void fcsim_zone_exit(void);
 bool fcsim_zone_allows(u64 iwwpn, u64 twwpn);
 
+/* fcsim_fpin.c: FPINs from the fabric */
+extern struct configfs_attribute fcsim_root_attr_fpin;
+
 /* fcsim_cfs.c: /sys/kernel/config/fcsim */
 int fcsim_cfs_init(void);
 void fcsim_cfs_exit(void);

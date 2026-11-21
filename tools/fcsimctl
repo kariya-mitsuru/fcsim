@@ -22,6 +22,9 @@ tools/fcsim-targetcli and tools/fcsim-targetctl.
   fcsimctl zone commit | revert
                      zone edits and mode are staged; commit makes them
                      active at once, revert discards them
+  fcsimctl fpin li|pn|dn|cn <wwpn> [event] [key=value...]
+                     the fabric sends an FPIN about port <wwpn> to the
+                     initiators zoned with it (cn: to that initiator)
   fcsimctl save <file.json>
   fcsimctl restore <file.json>
   fcsimctl clear
@@ -448,6 +451,11 @@ def cmd_zone(args):
         raise Error("unknown zone action: %s" % a)
 
 
+def cmd_fpin(args):
+    check_loaded()
+    write(CFS + "/fpin", " ".join([args.kind, wwn(args.wwpn)] + args.opts))
+
+
 def saved_config():
     hosts = []
     for w in host_wwpns():
@@ -555,6 +563,13 @@ def main():
                                       "mode", "commit", "revert"))
     s.add_argument("args", nargs="*", metavar="arg")
     s.set_defaults(func=cmd_zone)
+
+    s = sub.add_parser("fpin", help="send a Fabric Performance Impact Notification")
+    s.add_argument("kind", choices=("li", "pn", "dn", "cn"),
+                   help="link integrity, peer congestion, delivery, congestion")
+    s.add_argument("wwpn", help="the port the notification is about")
+    s.add_argument("opts", nargs="*", metavar="event|key=value")
+    s.set_defaults(func=cmd_fpin)
 
     s = sub.add_parser("save", help="save zoning, hosts, links and fault rules as JSON")
     s.add_argument("file")

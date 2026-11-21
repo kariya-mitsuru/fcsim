@@ -6,7 +6,7 @@ FC HBA なしで「FC ストレージ」をエミュレーションする Linux 
   LUN は普通の SCSI ディスク（`/dev/sdX`）として見える
 - target 側は LIO の fabric module（`fcsim`）なので、LUN・ACL は targetcli で管理できる
 - 両者を同じモジュール内の仮想ファブリックでつなぐ。リンクの上げ下げ、ゾーニング、障害注入（遅延・無応答・エラー）、
-  RSCN、fc_host 統計があり、dm-multipath / multipathd と組み合わせて試せる
+  FPIN、RSCN、fc_host 統計があり、dm-multipath / multipathd と組み合わせて試せる
 
 設計は `docs/design.md`、今後の計画は `docs/stage3-plan.md`。
 
@@ -69,6 +69,9 @@ sudo tools/fcsimctl link 10:00:00:00:c9:00:00:01 down
 sudo tools/fcsimctl zone create z1 10:00:00:00:c9:00:00:01 21:00:00:00:00:00:00:01
 sudo tools/fcsimctl zone mode on
 sudo tools/fcsimctl zone commit
+
+# FPIN: T1 のリンク品質が悪い、とファブリックが通知する（multipathd の marginal_pathgroups fpin が反応する）
+sudo tools/fcsimctl fpin li 21:00:00:00:00:00:00:01 link_failure
 
 # 保存・復元（target 側は fcsim-targetctl、initiator 側とゾーニングは fcsimctl）
 sudo tools/fcsim-targetctl save /etc/target/fcsim-target.json

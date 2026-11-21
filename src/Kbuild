@@ -1,3 +1,3 @@
 # SPDX-License-Identifier: GPL-2.0
 obj-m := tcm_fcsim.o
-tcm_fcsim-y := fcsim_main.o fcsim_ini.o fcsim_tgt.o fcsim_cfs.o fcsim_fault.o fcsim_zone.o
+tcm_fcsim-y := fcsim_main.o fcsim_ini.o fcsim_tgt.o fcsim_cfs.o fcsim_fault.o fcsim_zone.o fcsim_fpin.o

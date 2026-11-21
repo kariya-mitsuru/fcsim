@@ -194,6 +194,10 @@
 
 ### G. FPIN / marginal パス（追加候補）
 
+**実施済み**: `src/fcsim_fpin.c`（`/sys/kernel/config/fcsim/fpin`）、`fcsimctl fpin ...`、`tests/fpin-fcsim.sh`。
+RHEL 9 の multipathd（0.8.7）の `marginal_pathgroups fpin` で、LI を受けたパスが別グループに移り、
+I/O がそのパスを避け、LINKUP で戻ることを確認した。NPIV（D）は libvirt での活用が限られるため後回しにした。
+
 段階 2 の障害注入の延長。障害ルールに「FPIN を送る」を加え、`fc_host_fpin_rcv()` に Link Integrity / Congestion の
 通知を渡す。対象の rport は Marginal 状態になり、FPIN の統計も増える。
 multipathd 側に `marginal_pathgroups`（RHEL 9 の 0.8.7 にもある）があるので、「壊れてはいないが品質の悪いパス」を

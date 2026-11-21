@@ -61,7 +61,8 @@ TESTS = \
 	"multipathd tests/multipathd-fcsim.sh" \
 	"misc tests/misc-fcsim.sh" \
 	"cli tests/cli-fcsim.sh" \
-	"zone tests/zone-fcsim.sh"
+	"zone tests/zone-fcsim.sh" \
+	"fpin tests/fpin-fcsim.sh"
 
 run-tests = @rc=0; for t in $(TESTS); do scripts/run-guest-test.sh $$t || rc=1; done; exit $$rc
 

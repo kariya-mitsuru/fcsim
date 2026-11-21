@@ -11,6 +11,7 @@
  *       draining                           (ro) logged-out sessions not yet drained
  *       faults/<target WWPN | any>/        fault injection rules (fcsim_fault.c)
  *   zoning/, zones/                        zoning (fcsim_zone.c)
+ *   fpin                                   (wo) send an FPIN (fcsim_fpin.c)
  */
 #define pr_fmt(fmt) "tcm_fcsim: " fmt
 
@@ -208,6 +209,7 @@ CONFIGFS_ATTR_RO(fcsim_root_, version);
 static struct configfs_attribute *fcsim_root_attrs[] = {
 	&fcsim_root_attr_fabric_name,
 	&fcsim_root_attr_version,
+	&fcsim_root_attr_fpin,
 	NULL,
 };
 
