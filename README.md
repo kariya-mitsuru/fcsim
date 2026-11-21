@@ -1,0 +1,90 @@
+# tcm_fcsim
+
+FC HBA なしで「FC ストレージ」をエミュレーションする Linux カーネルモジュール。
+
+- initiator 側には本物の FC HBA と同じく `/sys/class/fc_host`・`fc_remote_ports`・`fc_transport` が現れ、
+  LUN は普通の SCSI ディスク（`/dev/sdX`）として見える
+- target 側は LIO の fabric module（`fcsim`）なので、LUN・ACL は targetcli で管理できる
+- 両者を同じモジュール内の仮想ファブリックでつなぐ。リンクの上げ下げ、障害注入（遅延・無応答・エラー）、
+  RSCN、fc_host 統計があり、dm-multipath / multipathd と組み合わせて試せる
+
+設計は `docs/design.md`、今後の計画は `docs/stage3-plan.md`。
+
+## 対応カーネル
+
+| カーネル | ビルド | テスト |
+|---|---|---|
+| 開発用 6.18（KASAN / lockdep 有効、`scripts/build-kernel.sh`） | `make` | `make test` |
+| AlmaLinux 9（5.14.0-*.el9） | `make el9` | `make test-el9` |
+| WSL2（`uname -r` の 6.18.x-microsoft-standard-WSL2） | `make wsl` | `make test-wsl` |
+
+AlmaLinux 9 向けには DKMS RPM も作れる（`make rpm` → `rpmbuild/RPMS/noarch/`。要 rpm-build）。
+インストールすると dkms が各カーネル向けにモジュールを組み、`modprobe tcm_fcsim` で依存モジュールごと読み込める。
+ツールは `/usr/bin/fcsimctl`、`fcsim-targetcli`、`fcsim-targetctl`。`make test-rpm` はこの RPM を
+AlmaLinux 9 のゲストに入れて確認する（ホストには入れない）。
+
+テストはいずれも virtme-ng のゲスト内で動く（`scripts/vng-run.sh`）。結果とゲストの dmesg は `.test-out/` に残る。
+
+### 必要なもの
+
+共通: gcc、make、virtme-ng、qemu-kvm、targetcli（python3-rtslib）、sg3_utils、device-mapper-multipath、
+（RPM を作る場合）rpm-build、dkms
+
+- AlmaLinux 9 のカーネル: そのリリースの `kernel-core`、`kernel-modules-core`、`kernel-modules`、`kernel-devel`、
+  および virtme-ng が initramfs を作るための `busybox`（EPEL）。WSL の distro に入れるだけで、起動には影響しない
+  ```
+  sudo dnf install kernel-core-<rel> kernel-modules-core-<rel> kernel-modules-<rel> kernel-devel-<rel> busybox
+  ```
+- WSL2 のカーネル: パッケージのヘッダが無いので、同じリリースのソースから組む（数十分かかる。一度だけ）
+  ```
+  scripts/build-wsl-kernel.sh            # ~/build/wsl2-<version> に取得・設定・ビルド
+  make wsl                               # build/<release>/tcm_fcsim.ko
+  ```
+  WSL2 のカーネルが更新されたら（`uname -r` が変わったら）、もう一度組み直す。
+  WSL2 のカーネルには `SCSI_DH_ALUA` が無いので、multipathd は ALUA なし（`hardware_handler "0"`）で使う
+
+## 使い方の例
+
+```
+# モジュール（依存モジュールを先に）
+sudo modprobe target_core_mod
+sudo modprobe scsi_transport_fc
+sudo insmod build/$(uname -r)/tcm_fcsim.ko      # 開発用カーネルでは src/tcm_fcsim.ko
+
+# target 側: ramdisk を LUN 0 として出し、initiator に ACL を与える
+sudo tools/fcsim-targetcli /backstores/ramdisk create rd0 1G
+sudo tools/fcsim-targetcli /fcsim create naa.2100000000000001
+sudo tools/fcsim-targetcli /fcsim/naa.2100000000000001/luns create /backstores/ramdisk/rd0
+sudo tools/fcsim-targetcli /fcsim/naa.2100000000000001/acls create naa.10000000c9000001
+
+# initiator 側: 仮想 HBA ポートを作ると、ログインして LUN が /dev/sdX として現れる
+sudo tools/fcsimctl host create 10:00:00:00:c9:00:00:01
+sudo tools/fcsimctl status
+
+# 障害注入とリンク操作
+sudo tools/fcsimctl fault set 10:00:00:00:c9:00:00:01 21:00:00:00:00:00:00:01 delay_ms=100
+sudo tools/fcsimctl link 10:00:00:00:c9:00:00:01 down
+
+# 保存・復元（target 側は fcsim-targetctl、initiator 側は fcsimctl）
+sudo tools/fcsim-targetctl save /etc/target/fcsim-target.json
+sudo tools/fcsimctl save /etc/target/fcsim-initiator.json
+
+# 片付け
+sudo tools/fcsimctl clear
+sudo tools/fcsim-targetctl clear
+sudo rmdir /sys/kernel/config/target/fcsim
+sudo rmmod tcm_fcsim
+```
+
+**注意**: カーネルモジュールなので、不具合はホストのカーネルごと巻き込む。WSL2 では全 distro が同じカーネルを
+共有しているため、他の distro も止まる。まず virtme-ng のテスト（`make test-wsl` 等）で確認してから使うこと。
+
+## ディレクトリ
+
+```
+src/        カーネルモジュール
+tools/      fcsimctl（initiator 側・ファブリックの CLI）、fcsim-targetcli / fcsim-targetctl（targetcli ラッパー）
+scripts/    カーネルのビルド、virtme-ng の起動、テストの実行
+tests/      virtme-ng ゲスト内で動くテスト
+docs/       設計・計画
+```

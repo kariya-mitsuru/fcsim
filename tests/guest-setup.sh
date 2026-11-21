@@ -8,6 +8,19 @@
 
 export HOME=/tmp   # targetcli writes its prefs under $HOME
 
+# The module built for the running kernel: build/<release>/ for other kernels
+# (make KVER=<release>, e.g. AlmaLinux 9), src/ for the development kernel.
+FCSIM_KO="$TOP/build/$(uname -r)/tcm_fcsim.ko"
+[ -e "$FCSIM_KO" ] || FCSIM_KO="$TOP/src/tcm_fcsim.ko"
+
+# load_fcsim [module parameters]: its dependencies may be modules (they are
+# built in on the development kernel), and insmod does not resolve them.
+load_fcsim() {
+	modprobe target_core_mod
+	modprobe scsi_transport_fc
+	insmod "$FCSIM_KO" "$@"
+}
+
 guest_start_dbus() {
 	[ -S /run/dbus/system_bus_socket ] && return 0
 

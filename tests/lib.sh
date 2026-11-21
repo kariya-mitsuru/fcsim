@@ -59,6 +59,9 @@ disk_of() {
 	for d in /sys/class/scsi_host/"$1"/device/rport-*/target*/*:*:*:*/block/*; do
 		[ -e "$d" ] || continue
 		if [ "$(tr -d ' ' < "$d/../../model")" = "$2" ]; then
+			# The sysfs entry appears a little before the disk can be
+			# opened (seen on the WSL2 kernel).
+			blockdev --getsz "/dev/$(basename "$d")" >/dev/null 2>&1 || return 1
 			basename "$d"
 			return 0
 		fi

@@ -32,14 +32,15 @@ wait_for() {	# wait_for <seconds> <command...>
 fcsim_disk() {	# print /dev/sdX of the fcsim LUN 0, if any
 	local d
 	for d in /sys/class/fc_transport/target*/device/*/block/*; do
-		[ -e "$d" ] && { echo "/dev/$(basename "$d")"; return 0; }
+		[ -e "$d" ] && blockdev --getsz "/dev/$(basename "$d")" >/dev/null 2>&1 &&
+			{ echo "/dev/$(basename "$d")"; return 0; }
 	done
 	return 1
 }
 
 step "load modules"
 modprobe target_core_mod	# includes the ramdisk (rd_mcp) backstore
-insmod "$TOP/src/tcm_fcsim.ko"
+load_fcsim
 cat /sys/kernel/config/fcsim/version
 
 step "target side: ramdisk LUN on $TWWPN"

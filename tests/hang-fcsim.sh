@@ -29,12 +29,15 @@ DM=fcsim_hang
 
 ntargets() { wc -l < "$HOSTS/$1/targets"; }
 
-step "setup: dm-linear over null_blk as a backend we can freeze"
-modprobe null_blk nr_devices=1 gb=1
-dmsetup create $DM --table "0 $(blockdev --getsz /dev/nullb0) linear /dev/nullb0 0"
+step "setup: dm-linear over a loop device as a backend we can freeze"
+# (a loop device rather than null_blk, which e.g. the WSL2 kernel lacks)
+modprobe loop
+truncate -s 256M /tmp/hang.img
+LOOP=$(losetup -f --show /tmp/hang.img)
+dmsetup create $DM --table "0 $(blockdev --getsz $LOOP) linear $LOOP 0"
 modprobe target_core_mod
 modprobe target_core_iblock
-insmod "$TOP/src/tcm_fcsim.ko" tmr_timeout=1
+load_fcsim tmr_timeout=1
 $TCLI /backstores/block create hang /dev/mapper/$DM >/dev/null
 $TCLI /backstores/ramdisk create rd0 16M >/dev/null
 make_tport $T1 /backstores/block/hang $I1 $I2
@@ -117,7 +120,8 @@ echo "OK: EH terminated the exchanges, the device stayed usable"
 step "teardown"
 teardown_all
 dmsetup remove $DM
-rmmod null_blk
+losetup -d $LOOP
+rm -f /tmp/hang.img
 splat_check
 echo
 echo "PASS"

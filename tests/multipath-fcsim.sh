@@ -23,7 +23,7 @@ step "setup: one ramdisk behind T1 and T2, initiators I1 and I2"
 modprobe target_core_mod
 modprobe dm_multipath
 modprobe dm_round_robin
-insmod "$TOP/src/tcm_fcsim.ko" tmr_timeout=1
+load_fcsim tmr_timeout=1
 $TCLI /backstores/ramdisk create shared ${SIZE_MB}M >/dev/null
 make_tport $T1 /backstores/ramdisk/shared $I1 $I2
 make_tport $T2 /backstores/ramdisk/shared $I1 $I2

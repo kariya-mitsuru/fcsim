@@ -1,9 +1,10 @@
 #!/bin/bash
 # Run one guest test, keeping its output and the guest dmesg in .test-out/.
-#   scripts/run-guest-test.sh <name> <test command...>
+#   [KIMG=... TEST_TAG=...] scripts/run-guest-test.sh <name> <test command...>
+# TEST_TAG is appended to the output names (e.g. smoke-el9.log).
 set -u
 PROJ=$(cd "$(dirname "$0")/.." && pwd)
-name=$1; shift
+name=$1${TEST_TAG:+-$TEST_TAG}; shift
 mkdir -p "$PROJ/.test-out"
 rm -f "$PROJ/.test-out/$name".{log,dmesg}
 timeout "${TEST_TIMEOUT:-300}" "$PROJ/scripts/vng-run.sh" -- bash -c \

@@ -16,7 +16,7 @@ hexval() { printf '%d' "$(cat "$1")"; }
 
 step "setup: targets via fcsim-targetcli"
 modprobe target_core_mod
-insmod "$TOP/src/tcm_fcsim.ko"
+load_fcsim
 $TCLI /backstores/ramdisk create rd0 64M >/dev/null
 $TCLI /backstores/ramdisk create rd1 16M >/dev/null
 make_tport $T1 /backstores/ramdisk/rd0 $I1 $I2

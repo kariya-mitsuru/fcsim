@@ -1,16 +1,54 @@
-# Build tcm_fcsim out of tree against the development kernel.
-#   make            build src/tcm_fcsim.ko
-#   make clean
+# Build tcm_fcsim out of tree.
+#   make            build src/tcm_fcsim.ko for the development kernel (KDIR)
 #   make test       run all tests inside virtme-ng guests, one guest per test
 #                   (a regression may crash the kernel); output and guest
 #                   dmesg go to .test-out/
+#   make KVER=<release> kver
+#                   build build/<release>/tcm_fcsim.ko for another kernel,
+#                   using /lib/modules/<release>/build (or KVER_KDIR)
+#   make el9 / make test-el9
+#                   the same for the installed AlmaLinux 9 kernel, and run
+#                   all tests on it (needs kernel-core/-modules[-core],
+#                   kernel-devel and busybox of that release)
+#   make wsl / make test-wsl
+#                   the same for the WSL2 kernel this host runs, against the
+#                   tree built by scripts/build-wsl-kernel.sh; the tests boot
+#                   that tree's kernel in virtme-ng
+#   make rpm        DKMS RPM for AlmaLinux 9 in rpmbuild/ (from the working
+#                   tree, minus .gitignore'd files; needs rpm-build)
+#   make test-rpm   install that RPM in an AlmaLinux 9 kernel guest (overlay,
+#                   the host stays untouched) and check dkms + tools
+#   make clean
 KDIR ?= $(HOME)/build/linux-6.18
+VERSION := $(shell sed -n 's/^\#define FCSIM_VERSION[[:space:]]*"\(.*\)"/\1/p' src/fcsim.h)
+
+EL9_KVER ?= $(notdir $(lastword $(sort $(wildcard /lib/modules/*.el9*.x86_64))))
+KVER_KDIR ?= /lib/modules/$(KVER)/build
+WSL_KVER ?= $(shell uname -r)
+WSL_KDIR ?= $(HOME)/build/wsl2-$(firstword $(subst -, ,$(WSL_KVER)))
 
 all:
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/src W=1 modules
 
 clean:
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/src clean
+	rm -rf build
+
+# A copy of src/ per kernel, so builds for different kernels do not mix objects.
+kver:
+	@test -n "$(KVER)" || { echo "KVER=<kernel release> required"; exit 1; }
+	@test -e $(KVER_KDIR)/Makefile || { echo "no kernel build tree at $(KVER_KDIR) (install kernel-devel-$(KVER) or set KVER_KDIR)"; exit 1; }
+	mkdir -p build/$(KVER)
+	cp -p src/*.c src/*.h src/Kbuild build/$(KVER)/
+	$(MAKE) -C $(KVER_KDIR) M=$(CURDIR)/build/$(KVER) W=1 modules
+
+el9:
+	@test -n "$(EL9_KVER)" || { echo "no AlmaLinux 9 kernel in /lib/modules"; exit 1; }
+	$(MAKE) kver KVER=$(EL9_KVER)
+
+wsl:
+	@test -e $(WSL_KDIR)/Module.symvers || { echo "build the WSL2 kernel tree first: scripts/build-wsl-kernel.sh"; exit 1; }
+	$(MAKE) kver KVER=$(WSL_KVER) KVER_KDIR=$(WSL_KDIR)
 
 TESTS = \
 	"smoke tests/smoke-fcsim.sh" \
@@ -24,7 +62,32 @@ TESTS = \
 	"misc tests/misc-fcsim.sh" \
 	"cli tests/cli-fcsim.sh"
 
-test: all
-	@rc=0; for t in $(TESTS); do scripts/run-guest-test.sh $$t || rc=1; done; exit $$rc
+run-tests = @rc=0; for t in $(TESTS); do scripts/run-guest-test.sh $$t || rc=1; done; exit $$rc
 
-.PHONY: all clean test
+test: all
+	$(run-tests)
+
+test-el9: export KIMG = /lib/modules/$(EL9_KVER)/vmlinuz
+test-el9: export TEST_TAG = el9
+test-el9: el9
+	$(run-tests)
+
+test-wsl: export KDIR = $(WSL_KDIR)
+test-wsl: export TEST_TAG = wsl
+test-wsl: wsl
+	$(run-tests)
+
+rpm:
+	mkdir -p rpmbuild/SOURCES
+	git ls-files -z --cached --others --exclude-standard | \
+		tar --null -T - --transform 's|^|tcm_fcsim-$(VERSION)/|' \
+		-czf rpmbuild/SOURCES/tcm_fcsim-$(VERSION).tar.gz
+	rpmbuild -ba --define "_topdir $(CURDIR)/rpmbuild" \
+		--define "fcsim_version $(VERSION)" packaging/tcm_fcsim.spec
+
+test-rpm: export KIMG = /lib/modules/$(EL9_KVER)/vmlinuz
+test-rpm: export TEST_TAG = el9
+test-rpm: rpm
+	scripts/run-guest-test.sh package tests/package-el9.sh
+
+.PHONY: all clean kver el9 wsl rpm test test-el9 test-wsl test-rpm

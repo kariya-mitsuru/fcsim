@@ -31,7 +31,7 @@ step "setup: one ramdisk behind T1 and T2, initiators I1 and I2"
 modprobe target_core_mod
 modprobe dm_multipath
 modprobe dm_service_time
-insmod "$TOP/src/tcm_fcsim.ko" tmr_timeout=1
+load_fcsim tmr_timeout=1
 $TCLI /backstores/ramdisk create shared ${SIZE_MB}M >/dev/null
 make_tport $T1 /backstores/ramdisk/shared $I1 $I2
 make_tport $T2 /backstores/ramdisk/shared $I1 $I2
@@ -41,9 +41,20 @@ wait_for 10 sh -c "[ \$(ls -d /sys/class/fc_transport/target*/device/*/block/* 2
 udevadm settle
 
 step "start multipathd"
+# ALUA needs the scsi_dh_alua device handler (built in on the development
+# and AlmaLinux 9 kernels, missing on WSL2); without it, use the paths as
+# equals.
+if modprobe scsi_dh_alua 2>/dev/null || [ -d /sys/module/scsi_dh_alua ]; then
+	ALUA=1
+	HWH='"1 alua"'; PRIO=alua
+else
+	ALUA=0
+	HWH='"0"'; PRIO=const
+	echo "  no scsi_dh_alua: hardware_handler 0, prio const"
+fi
 mkdir -p /etc/multipath
 rm -f /etc/multipath/bindings /etc/multipath/wwids
-cat > /etc/multipath.conf <<'EOF'
+cat > /etc/multipath.conf <<EOF
 defaults {
 	polling_interval	1
 	user_friendly_names	yes
@@ -65,8 +76,8 @@ devices {
 		vendor			"LIO-ORG"
 		product			".*"
 		path_grouping_policy	group_by_prio
-		hardware_handler	"1 alua"
-		prio			alua
+		hardware_handler	$HWH
+		prio			$PRIO
 		path_selector		"service-time 0"
 		path_checker		tur
 		failback		immediate
@@ -95,7 +106,9 @@ wait_active() {	# wait_active <n> <seconds>
 
 wait_active 4 20 || fail "not all paths active: $(paths_state)"
 multipath -ll "$MAP" | sed 's/^/  /'
-multipath -ll "$MAP" | grep -q "hwhandler='1 alua'" || fail "ALUA handler not in use"
+if [ $ALUA = 1 ]; then
+	multipath -ll "$MAP" | grep -q "hwhandler='1 alua'" || fail "ALUA handler not in use"
+fi
 for rp in /sys/class/fc_remote_ports/rport-*; do
 	echo "  $(basename $rp): fast_io_fail_tmo=$(cat $rp/fast_io_fail_tmo) dev_loss_tmo=$(cat $rp/dev_loss_tmo)"
 	[ "$(cat $rp/fast_io_fail_tmo)" = 2 ] && [ "$(cat $rp/dev_loss_tmo)" = 30 ] \
@@ -167,7 +180,9 @@ echo "  recovered: $(paths_state)"
 splat_check
 
 step "teardown"
-multipath -F
+# udev may still be probing the map after the last reinstatement.
+udevadm settle
+wait_for 10 multipath -F || fail "multipath -F: map stays in use"
 cleanup
 teardown_all
 splat_check

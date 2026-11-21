@@ -30,7 +30,7 @@ wait_disks() {	# wait_disks <count>
 
 step "load modules"
 modprobe target_core_mod
-insmod "$TOP/src/tcm_fcsim.ko"
+load_fcsim
 
 step "targetcli: two ramdisk LUNs on $T, ACL for $I"
 $TCLI /backstores/ramdisk create rd0 32M

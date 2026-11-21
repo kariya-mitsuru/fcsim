@@ -15,3 +15,5 @@ __pycache__/
 # logs
 *.log
 .test-out/
+build/
+rpmbuild/

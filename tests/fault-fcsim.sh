@@ -13,7 +13,7 @@ F=$HOSTS/$I1/faults/$T1
 
 step "setup: T1 (rd0) and T2 (rd1), host I1"
 modprobe target_core_mod
-insmod "$TOP/src/tcm_fcsim.ko" tmr_timeout=1
+load_fcsim tmr_timeout=1
 $TCLI /backstores/ramdisk create rd0 16M >/dev/null
 $TCLI /backstores/ramdisk create rd1 16M >/dev/null
 make_tport $T1 /backstores/ramdisk/rd0 $I1
@@ -64,7 +64,8 @@ echo "  ok"
 step "error=medium count=1: the READ fails with a medium error"
 rule error=medium count=1
 if rd; then fail "medium error not reported"; fi
-dmesg | grep -m1 "Unrecovered read error" | sed 's/^/  /' || fail "no sense in dmesg"
+# (decoded only with CONFIG_SCSI_CONSTANTS, which e.g. WSL2 lacks)
+dmesg | grep -m1 -E "Unrecovered read error|ASC=0x11 ASCQ=0x0" | sed 's/^/  /' || fail "no sense in dmesg"
 rd || fail "read after the one-shot error"
 
 step "error=aborted count=1: ABORTED COMMAND is retried"

@@ -168,6 +168,23 @@
   「実行中のカーネルのタグを取ってきてビルドする」スクリプトにする
 - 結論: 互換層は当面ほぼ不要。F の主な作業は、ビルド・テスト環境（両カーネルを virtme-ng で回す仕組み）と配布物の作成
 
+**F の実施内容**
+
+- ビルド: `make KVER=<release> kver` で `build/<release>/` に別ツリーとしてビルド（`make el9`、`make wsl` はその短縮）。
+  `scsi_host_template` の const を外した以外、ソースの互換対応は不要だった
+- テスト: `make test-el9` / `make test-wsl` が同じテスト一式を各カーネルの virtme-ng ゲストで流す。
+  AlmaLinux 9 はインストール済みのカーネル（`KIMG=/lib/modules/<rel>/vmlinuz`、initramfs 用に busybox）、
+  WSL2 は `scripts/build-wsl-kernel.sh` で実行中のカーネルと同じソース・設定から組んだツリーを起動する
+- WSL2 のツリーでビルドしたモジュールは、vermagic と、実際の WSL2 の tcm_loop が要求する 43 シンボルの CRC が一致した
+  （= 実機の WSL2 にそのまま読み込める見込み）。setlocalversion が付ける `+` は `LOCALVERSION=` で抑止
+- カーネルごとの違いでテスト側を直した点: `scsi_transport_fc` / `loop` がモジュール（AlmaLinux 9）、
+  `null_blk` と `SCSI_DH_ALUA` が無い（WSL2。hang は loop デバイスに、multipathd は ALUA 無しの設定に切り替え）、
+  センスの文字列化（`SCSI_CONSTANTS`）が無い（WSL2）、ディスクが sysfs に出てから開けるまでの時間差
+- 配布: AlmaLinux 9 向け DKMS RPM（`packaging/`、`make rpm`）。`make test-rpm` で AlmaLinux 9 のゲストに
+  インストールし（ゲストの /usr・/var は overlay なのでホストは汚れない）、dkms によるビルド、modprobe、
+  インストールされたツールでの I/O、アンインストールを確認する
+- 残り: 実機の WSL2 へのロード確認（手動。不具合は全 distro に波及するので、virtme-ng のテストが通ってから）
+
 - KASAN / lockdep での検証は開発用カーネルで続ける。他の 2 つは「ビルドが通り、テストが通ること」を確認する
 - 配布物はまず AlmaLinux 9 向けの DKMS RPM。WSL2 向けは手順書とスクリプトにする（WSL2 のカーネルには
   パッケージ管理されたヘッダが無いため）

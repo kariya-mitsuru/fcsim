@@ -240,6 +240,10 @@ src/
 tools/fcsim-targetcli, fcsim-targetctl, fcsim_rtslib.py   targetcli 連携
 tools/fcsimctl                                            initiator 側・ファブリックの CLI
 scripts/run-guest-test.sh   ゲストでテストを 1 本実行し、出力と dmesg を .test-out/ に残す
+scripts/vng-run.sh          virtme-ng で開発用カーネル、または KIMG のカーネル（AlmaLinux 9 等）を起動
+scripts/build-kernel.sh     開発用カーネル（KASAN / lockdep）のビルド
+scripts/build-wsl-kernel.sh 実行中の WSL2 カーネルと同じソース・設定のツリーを取得・ビルド
+build/<release>/            開発用以外のカーネル向けのビルド（make el9 / make wsl / make KVER=...）
 tests/            virtme-ng ゲスト内で実行するテスト（make test で全部）
   smoke-fcsim.sh, smoke-fcsim-targetcli.sh   基本動作、targetcli 連携
   race-fcsim.sh {abort,close}                競合の回帰テスト（dbg_* パラメータで窓を広げる）

@@ -12,7 +12,7 @@ TPG=$LIO/fcsim/$T1/tpgt_1
 
 step "setup: T1 without ACLs, demo mode off"
 modprobe target_core_mod
-insmod "$TOP/src/tcm_fcsim.ko"
+load_fcsim
 $TCLI /backstores/ramdisk create rd0 16M >/dev/null
 $TCLI /fcsim create "$(wwpn_naa $T1)" >/dev/null
 $TCLI "/fcsim/$(wwpn_naa $T1)/luns" create /backstores/ramdisk/rd0 >/dev/null
