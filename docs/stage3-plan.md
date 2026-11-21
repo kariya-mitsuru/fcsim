@@ -186,7 +186,9 @@
 - 配布: AlmaLinux 9 向け DKMS RPM（`packaging/`、`make rpm`）。`make test-rpm` で AlmaLinux 9 のゲストに
   インストールし（ゲストの /usr・/var は overlay なのでホストは汚れない）、dkms によるビルド、modprobe、
   インストールされたツールでの I/O、アンインストールを確認する
-- 残り: 実機の WSL2 へのロード確認（手動。不具合は全 distro に波及するので、virtme-ng のテストが通ってから）
+- 実機の WSL2（6.18.58.1-microsoft-standard-WSL2）で `scripts/wsl-try.sh` を実行し、読み込み・取り外し、
+  ramdisk の LUN への 16 MiB の書き込みと読み返し、link down / up 後の読み返し、後片付けまで問題無いことを確認した
+  （dmesg に BUG / WARNING 無し）
 
 - KASAN / lockdep での検証は開発用カーネルで続ける。他の 2 つは「ビルドが通り、テストが通ること」を確認する
 - 配布物はまず AlmaLinux 9 向けの DKMS RPM。WSL2 向けは手順書とスクリプトにする（WSL2 のカーネルには
