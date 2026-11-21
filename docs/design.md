@@ -221,6 +221,10 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test で
   fault-fcsim.sh                             障害注入、fast_io_fail_tmo、RSCN / link イベント（fc-events.py）
   hang-fcsim.sh                              バックエンド停止（dmsetup suspend）時の EH とファブリックの応答性
   multipath-fcsim.sh                         2 iport × 2 tport の dm-multipath フェイルオーバとデータ整合性
+                                             （dmsetup で直接組んだマップ）
+  multipathd-fcsim.sh                        multipathd（ALUA・service-time）: rport の fast_io_fail_tmo /
+                                             dev_loss_tmo 設定、パスの自動復帰、全パスダウン時のキューイング
+                                             （要 device-mapper-multipath、カーネルに SCSI_DH_ALUA / DM_MULTIPATH_ST）
   misc-fcsim.sh                              拒否ログの抑制、1 ページを超える一覧、TPG 属性
 ```
 

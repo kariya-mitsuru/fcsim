@@ -20,6 +20,7 @@ TESTS = \
 	"fault tests/fault-fcsim.sh" \
 	"hang tests/hang-fcsim.sh" \
 	"multipath tests/multipath-fcsim.sh" \
+	"multipathd tests/multipathd-fcsim.sh" \
 	"misc tests/misc-fcsim.sh"
 
 test: all

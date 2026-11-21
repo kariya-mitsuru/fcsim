@@ -32,10 +32,15 @@ CONFIG_ITEMS=(
 	CONFIG_NVME_TARGET_FC=m
 	CONFIG_NVME_TARGET_FCLOOP=m
 
-	# Multipath (for later testing)
+	# Multipath, as on a RHEL FC host: ALUA device handler and the
+	# service-time / queue-length path selectors
 	CONFIG_MD=y
 	CONFIG_BLK_DEV_DM=m
 	CONFIG_DM_MULTIPATH=m
+	CONFIG_DM_MULTIPATH_ST=m
+	CONFIG_DM_MULTIPATH_QL=m
+	CONFIG_SCSI_DH=y
+	CONFIG_SCSI_DH_ALUA=y
 
 	# Debugging aids
 	CONFIG_DEBUG_INFO_DWARF5=y
