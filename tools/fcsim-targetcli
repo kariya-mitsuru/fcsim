@@ -1,0 +1,17 @@
+#!/usr/bin/python3 -s
+"""targetcli with the tcm_fcsim fabric ("fcsim") enabled.
+
+Invoked as fcsim-targetctl (symlink), runs targetctl instead, so that
+'targetctl save/restore' also know about the fcsim fabric.
+"""
+import os
+import runpy
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import fcsim_rtslib  # noqa: E402
+
+fcsim_rtslib.register()
+
+tool = "targetctl" if os.path.basename(sys.argv[0]).endswith("targetctl") else "targetcli"
+runpy.run_path("/usr/bin/" + tool, run_name="__main__")
