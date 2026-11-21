@@ -1,0 +1,434 @@
+#!/usr/bin/python3 -s
+"""fcsimctl - manage the initiator side and fabric of tcm_fcsim.
+
+The target side (LUNs, ACLs) is managed with targetcli / targetctl through
+tools/fcsim-targetcli and tools/fcsim-targetctl.
+
+  fcsimctl status [--json]
+  fcsimctl host create <wwpn> [--wwnn <wwnn>] [--link up|down]
+  fcsimctl host delete <wwpn>
+  fcsimctl link <wwpn> up|down
+  fcsimctl lip <wwpn>
+  fcsimctl fault list
+  fcsimctl fault set <initiator> <target|any> [delay_ms=N] [drop=none|cmd|rsp]
+                     [error=none|transport|busy|qfull|medium|aborted]
+                     [probability=N] [count=N]
+  fcsimctl fault clear <initiator> [<target|any>]
+  fcsimctl stats <wwpn> [--reset]
+  fcsimctl save <file.json>
+  fcsimctl restore <file.json>
+  fcsimctl clear
+
+WWPNs are accepted as 10:00:00:00:c9:00:00:01, naa.10000000c9000001,
+0x10000000c9000001 or 10000000c9000001.  Restore the target side
+(fcsim-targetctl restore) before the initiator side.
+"""
+
+import argparse
+import glob
+import json
+import os
+import re
+import sys
+
+CFS = "/sys/kernel/config/fcsim"
+HOSTS = CFS + "/hosts"
+LIO_FABRIC = "/sys/kernel/config/target/fcsim"
+FAULT_ATTRS = ("delay_ms", "drop", "error", "probability", "count")
+FAULT_DEFAULTS = {"delay_ms": "0", "drop": "none", "error": "none",
+                  "probability": "100", "count": "-1"}
+SAVE_VERSION = 1
+
+
+class Error(Exception):
+    pass
+
+
+# ------------------------------------------------------------------ helpers
+
+def wwn(text):
+    """Normalize a WWN to xx:xx:xx:xx:xx:xx:xx:xx."""
+    t = text.strip().lower()
+    for prefix in ("naa.", "0x"):
+        if t.startswith(prefix):
+            t = t[len(prefix):]
+    t = t.replace(":", "")
+    if not re.fullmatch(r"[0-9a-f]{16}", t) or int(t, 16) == 0:
+        raise Error("invalid WWN: %s" % text)
+    return ":".join(t[i:i + 2] for i in range(0, 16, 2))
+
+
+def rule_name(text):
+    return "any" if text == "any" else wwn(text)
+
+
+def read(path, default=None):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        if default is None:
+            raise
+        return default
+
+
+def write(path, value):
+    try:
+        with open(path, "w") as f:
+            f.write(str(value))
+    except OSError as e:
+        raise Error("%s: %s" % (path, e.strerror))
+
+
+def lines(path):
+    return [l for l in read(path, "").splitlines() if l]
+
+
+def check_loaded():
+    if not os.path.isdir(HOSTS):
+        raise Error("tcm_fcsim is not loaded (%s missing)" % HOSTS)
+
+
+def host_dir(w):
+    d = os.path.join(HOSTS, wwn(w))
+    if not os.path.isdir(d):
+        raise Error("no such host: %s" % wwn(w))
+    return d
+
+
+def host_wwpns():
+    return sorted(os.listdir(HOSTS)) if os.path.isdir(HOSTS) else []
+
+
+# ------------------------------------------------------------------ state
+
+def sd_devices(rport_dev):
+    """sd devices under an rport: [(h:c:t:l, sdX, state)]."""
+    out = []
+    for blk in sorted(glob.glob(rport_dev + "/target*/*:*:*:*/block/*")):
+        sdev = os.path.dirname(os.path.dirname(blk))
+        out.append((os.path.basename(sdev), os.path.basename(blk),
+                    read(sdev + "/state", "?")))
+    return out
+
+
+def host_state(w):
+    d = os.path.join(HOSTS, w)
+    shost = read(d + "/scsi_host")
+    fch = "/sys/class/fc_host/" + shost
+    rports = []
+    for rp in sorted(glob.glob("/sys/class/scsi_host/%s/device/rport-*" % shost)):
+        name = os.path.basename(rp)
+        cls = "/sys/class/fc_remote_ports/" + name
+        rports.append({
+            "rport": name,
+            "port_name": wwn(read(cls + "/port_name")),
+            "port_id": read(cls + "/port_id", "?"),
+            "state": read(cls + "/port_state", "?"),
+            "dev_loss_tmo": read(cls + "/dev_loss_tmo", "?"),
+            "fast_io_fail_tmo": read(cls + "/fast_io_fail_tmo", "?"),
+            "luns": [{"hctl": h, "dev": s, "state": st}
+                     for h, s, st in sd_devices(rp)],
+        })
+    faults = []
+    for fd in sorted(glob.glob(d + "/faults/*")):
+        f = {"target": os.path.basename(fd)}
+        for a in FAULT_ATTRS + ("injected",):
+            f[a] = read(os.path.join(fd, a))
+        faults.append(f)
+    return {
+        "wwpn": w,
+        "wwnn": read(d + "/node_name"),
+        "port_id": read(d + "/port_id"),
+        "link": read(d + "/link"),
+        "scsi_host": shost,
+        "port_state": read(fch + "/port_state", "?"),
+        "speed": read(fch + "/speed", "?"),
+        "targets": lines(d + "/targets"),
+        "draining": int(read(d + "/draining", "0")),
+        "rports": rports,
+        "faults": faults,
+    }
+
+
+def target_state():
+    out = []
+    for t in sorted(glob.glob(LIO_FABRIC + "/*/tpgt_1")):
+        out.append({
+            "wwpn": os.path.basename(os.path.dirname(t)),
+            "port_id": read(t + "/port_id", "?"),
+            "enabled": read(t + "/enable", "0") == "1",
+            "luns": len(glob.glob(t + "/lun/lun_*")),
+            "acls": sorted(os.path.basename(a) for a in glob.glob(t + "/acls/*")),
+            "sessions": lines(t + "/sessions"),
+        })
+    return out
+
+
+def fabric_state():
+    return {
+        "fabric_name": read(CFS + "/fabric_name"),
+        "version": read(CFS + "/version"),
+        "hosts": [host_state(w) for w in host_wwpns()],
+        "targets": target_state(),
+    }
+
+
+# ------------------------------------------------------------------ commands
+
+def cmd_status(args):
+    check_loaded()
+    st = fabric_state()
+    if args.json:
+        json.dump(st, sys.stdout, indent=2)
+        print()
+        return
+    print("fabric %s (tcm_fcsim %s)" % (st["fabric_name"], st["version"]))
+    print()
+    print("target ports:")
+    if not st["targets"]:
+        print("  (none)")
+    for t in st["targets"]:
+        print("  %s  port_id %s  %s  luns %d  acls %d  sessions %d" % (
+            t["wwpn"], t["port_id"], "enabled" if t["enabled"] else "disabled",
+            t["luns"], len(t["acls"]), len(t["sessions"])))
+    print()
+    print("initiator ports:")
+    if not st["hosts"]:
+        print("  (none)")
+    for h in st["hosts"]:
+        print("  %s  %s  port_id %s  link %s (%s, %s)%s" % (
+            h["wwpn"], h["scsi_host"], h["port_id"], h["link"],
+            h["port_state"], h["speed"],
+            "  draining %d" % h["draining"] if h["draining"] else ""))
+        for rp in h["rports"]:
+            print("    -> %s  %s  %s  dev_loss_tmo %s  fast_io_fail_tmo %s" % (
+                rp["port_name"], rp["rport"], rp["state"],
+                rp["dev_loss_tmo"], rp["fast_io_fail_tmo"]))
+            for lun in rp["luns"]:
+                print("         %s  /dev/%s  %s" % (lun["hctl"], lun["dev"], lun["state"]))
+        for f in h["faults"]:
+            set_attrs = " ".join("%s=%s" % (a, f[a]) for a in FAULT_ATTRS
+                                 if f[a] != FAULT_DEFAULTS[a])
+            print("    fault %s: %s  (injected %s)" % (
+                f["target"], set_attrs or "(no effect)", f["injected"]))
+
+
+def host_create(w, wwnn=None, link="up"):
+    d = os.path.join(HOSTS, w)
+    if os.path.isdir(d):
+        raise Error("host exists: %s" % w)
+    try:
+        os.mkdir(d)
+    except OSError as e:
+        raise Error("mkdir %s: %s" % (d, e.strerror))
+    if wwnn and wwnn != read(d + "/node_name"):
+        write(d + "/link", "down")	# node_name is only writable while down
+        write(d + "/node_name", wwnn)
+        write(d + "/link", link)
+    elif link != "up":
+        write(d + "/link", link)
+    return d
+
+
+def host_delete(w):
+    d = host_dir(w)
+    for fd in glob.glob(d + "/faults/*"):
+        os.rmdir(fd)
+    os.rmdir(d)
+
+
+def cmd_host(args):
+    check_loaded()
+    w = wwn(args.wwpn)
+    if args.action == "create":
+        host_create(w, wwn(args.wwnn) if args.wwnn else None, args.link)
+        print("%s: %s" % (w, read(os.path.join(HOSTS, w, "scsi_host"))))
+    else:
+        host_delete(w)
+
+
+def cmd_link(args):
+    check_loaded()
+    write(host_dir(args.wwpn) + "/link", args.state)
+
+
+def cmd_lip(args):
+    check_loaded()
+    shost = read(host_dir(args.wwpn) + "/scsi_host")
+    write("/sys/class/fc_host/%s/issue_lip" % shost, "1")
+
+
+def fault_set(hdir, target, attrs):
+    fd = os.path.join(hdir, "faults", target)
+    if not os.path.isdir(fd):
+        os.mkdir(fd)
+    for k, v in attrs.items():
+        if k not in FAULT_ATTRS:
+            raise Error("unknown fault attribute: %s (one of %s)" % (k, ", ".join(FAULT_ATTRS)))
+        write(os.path.join(fd, k), v)
+
+
+def cmd_fault(args):
+    check_loaded()
+    if args.action == "list":
+        for w in host_wwpns():
+            for f in host_state(w)["faults"]:
+                print("%s %s %s injected=%s" % (
+                    w, f["target"],
+                    " ".join("%s=%s" % (a, f[a]) for a in FAULT_ATTRS), f["injected"]))
+        return
+    if not args.initiator:
+        raise Error("fault %s: initiator WWPN required" % args.action)
+    hdir = host_dir(args.initiator)
+    if args.action == "set":
+        if not args.target:
+            raise Error("fault set: target WWPN or 'any' required")
+        attrs = {}
+        for kv in args.attrs:
+            if "=" not in kv:
+                raise Error("expected attr=value: %s" % kv)
+            k, v = kv.split("=", 1)
+            attrs[k] = v
+        fault_set(hdir, rule_name(args.target), attrs)
+    else:
+        targets = [rule_name(args.target)] if args.target else \
+            [os.path.basename(p) for p in glob.glob(hdir + "/faults/*")]
+        for t in targets:
+            fd = os.path.join(hdir, "faults", t)
+            if os.path.isdir(fd):
+                os.rmdir(fd)
+
+
+def cmd_stats(args):
+    check_loaded()
+    shost = read(host_dir(args.wwpn) + "/scsi_host")
+    sdir = "/sys/class/fc_host/%s/statistics" % shost
+    if args.reset:
+        write(sdir + "/reset_statistics", "1")
+        return
+    for p in sorted(glob.glob(sdir + "/*")):
+        name = os.path.basename(p)
+        if name == "reset_statistics":
+            continue
+        v = read(p, "")
+        try:
+            v = str(int(v, 16))
+        except ValueError:
+            pass
+        print("%-28s %s" % (name, v))
+
+
+def saved_config():
+    hosts = []
+    for w in host_wwpns():
+        h = host_state(w)
+        hosts.append({
+            "wwpn": w,
+            "wwnn": h["wwnn"],
+            "link": h["link"],
+            "faults": [{k: f[k] for k in ("target",) + FAULT_ATTRS}
+                       for f in h["faults"]],
+        })
+    return {"version": SAVE_VERSION, "hosts": hosts}
+
+
+def cmd_save(args):
+    check_loaded()
+    cfg = saved_config()
+    tmp = args.file + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(cfg, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, args.file)
+
+
+def clear_all():
+    for w in host_wwpns():
+        host_delete(w)
+
+
+def cmd_clear(args):
+    check_loaded()
+    clear_all()
+
+
+def cmd_restore(args):
+    check_loaded()
+    with open(args.file) as f:
+        cfg = json.load(f)
+    if cfg.get("version") != SAVE_VERSION:
+        raise Error("unsupported config version: %r" % cfg.get("version"))
+    clear_all()
+    for h in cfg.get("hosts", []):
+        w = wwn(h["wwpn"])
+        # A new host logs in right away; take the link down while the fault
+        # rules go in, so that I/O after the restore sees all of them.
+        d = host_create(w, wwn(h["wwnn"]) if h.get("wwnn") else None, "down")
+        for f in h.get("faults", []):
+            fault_set(d, rule_name(f["target"]),
+                      {k: f[k] for k in FAULT_ATTRS if k in f})
+        write(d + "/link", h.get("link", "up"))
+
+
+# ------------------------------------------------------------------ main
+
+def main():
+    p = argparse.ArgumentParser(
+        prog="fcsimctl", description=__doc__.split("\n\n")[0],
+        epilog="Target side: fcsim-targetcli / fcsim-targetctl.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("status", help="show the fabric")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(func=cmd_status)
+
+    s = sub.add_parser("host", help="create / delete an initiator port")
+    s.add_argument("action", choices=("create", "delete"))
+    s.add_argument("wwpn")
+    s.add_argument("--wwnn")
+    s.add_argument("--link", choices=("up", "down"), default="up")
+    s.set_defaults(func=cmd_host)
+
+    s = sub.add_parser("link", help="set an initiator port's link up / down")
+    s.add_argument("wwpn")
+    s.add_argument("state", choices=("up", "down"))
+    s.set_defaults(func=cmd_link)
+
+    s = sub.add_parser("lip", help="retry logins and rescan (issue_lip)")
+    s.add_argument("wwpn")
+    s.set_defaults(func=cmd_lip)
+
+    s = sub.add_parser("fault", help="fault injection rules")
+    s.add_argument("action", choices=("list", "set", "clear"))
+    s.add_argument("initiator", nargs="?")
+    s.add_argument("target", nargs="?", help="target WWPN or 'any'")
+    s.add_argument("attrs", nargs="*", metavar="attr=value")
+    s.set_defaults(func=cmd_fault)
+
+    s = sub.add_parser("stats", help="fc_host statistics of an initiator port")
+    s.add_argument("wwpn")
+    s.add_argument("--reset", action="store_true")
+    s.set_defaults(func=cmd_stats)
+
+    s = sub.add_parser("save", help="save hosts, links and fault rules as JSON")
+    s.add_argument("file")
+    s.set_defaults(func=cmd_save)
+
+    s = sub.add_parser("restore", help="replace the configuration with a saved one")
+    s.add_argument("file")
+    s.set_defaults(func=cmd_restore)
+
+    s = sub.add_parser("clear", help="delete all initiator ports and fault rules")
+    s.set_defaults(func=cmd_clear)
+
+    args = p.parse_args()
+    try:
+        args.func(args)
+    except (Error, OSError) as e:
+        print("fcsimctl: %s" % e, file=sys.stderr)
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

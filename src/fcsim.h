@@ -23,6 +23,7 @@
 #include <linux/workqueue.h>
 #include <linux/atomic.h>
 #include <target/target_core_base.h>
+#include <scsi/scsi_transport_fc.h>
 
 #define FCSIM_VERSION		"0.1"
 #define FCSIM_NAME		"tcm_fcsim"
@@ -83,6 +84,28 @@ struct fcsim_fault_action {
 	enum fcsim_error	error;
 };
 
+/*
+ * fc_host statistics, counted per CPU without locks; get/reset in
+ * fcsim_ini.c.  Physical-layer error counters do not exist on a virtual
+ * link and stay 0.
+ */
+struct fcsim_stats {
+	u64	tx_frames;
+	u64	tx_words;
+	u64	rx_frames;
+	u64	rx_words;
+	u64	lip_count;
+	u64	dumped_frames;		/* fault injection: frames lost */
+	u64	link_failure_count;
+	u64	fcp_input_requests;
+	u64	fcp_output_requests;
+	u64	fcp_control_requests;
+	u64	fcp_input_bytes;
+	u64	fcp_output_bytes;
+	u64	fcp_packet_aborts;
+	u64	fc_xid_not_found;	/* response for a terminated exchange */
+};
+
 /* Initiator port: one virtual HBA port = one Scsi_Host. */
 struct fcsim_iport {
 	struct list_head	node;		/* fcsim_iports */
@@ -103,6 +126,12 @@ struct fcsim_iport {
 	spinlock_t		held_lock;
 	struct list_head	held_list;
 	struct list_head	faults;		/* fcsim_fault rules (RCU, held_lock) */
+
+	struct fcsim_stats __percpu *stats;
+	spinlock_t		stats_lock;	/* stats_base, fc_stats */
+	struct fcsim_stats	stats_base;	/* totals at the last reset */
+	unsigned long		stats_reset;	/* jiffies of the last reset */
+	struct fc_host_statistics fc_stats;	/* returned to the FC transport */
 
 	char			name[FCSIM_WWN_BUFLEN];
 };

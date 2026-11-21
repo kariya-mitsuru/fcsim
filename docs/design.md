@@ -184,6 +184,30 @@ targetcli 上では単一 TPG の fabric（qla2xxx と同じ）として `tpg1` 
       faults/<target WWPN|any>/ 障害注入ルール（上記）
 ```
 
+fc_host の統計（`/sys/class/fc_host/hostN/statistics/`）は iport ごとの per-CPU カウンタから返す。
+`fcp_{input,output,control}_requests`、`fcp_{input,output}_megabytes`、`tx/rx_frames`・`tx/rx_words`
+（フレームサイズ 2048 とフレームのオーバーヘッド 9 ワードで換算）、`link_failure_count`（link down）、
+`lip_count`（issue_lip）、`fcp_packet_aborts`（EH abort）、`dumped_frames`（障害注入で失ったフレーム）、
+`fc_xid_not_found`（終了済みのエクスチェンジに届いた応答）、`seconds_since_last_reset`。物理層のエラー類は 0。
+`reset_statistics` はその時点の値を基準として記録する。
+
+### initiator 側 CLI（`tools/fcsimctl`）
+
+configfs を直接触らずに操作するための Python スクリプト（追加依存なし）。
+
+```
+fcsimctl status [--json]                    ファブリック全体（target ポート、host、rport、LUN、障害ルール）
+fcsimctl host create|delete <wwpn> [--wwnn X] [--link up|down]
+fcsimctl link <wwpn> up|down
+fcsimctl lip <wwpn>
+fcsimctl fault list | set <i> <t|any> attr=value... | clear <i> [<t|any>]
+fcsimctl stats <wwpn> [--reset]
+fcsimctl save|restore <file.json>           host・link・障害ルール（target 側は fcsim-targetctl で別に）
+fcsimctl clear
+```
+
+WWPN は `10:00:...`、`naa.1000...`、`0x1000...`、`1000...` のいずれでもよい。
+
 `/sys/class/fc_host/hostN/issue_lip` に書くと、未ログインの組み合わせを再試行し、online の rport を再スキャンする
 （`fc_user_scan` と同じく host_lock の下で online のものだけ）。
 
@@ -213,7 +237,8 @@ src/
   fcsim_tgt.c     target_core_fabric_ops、LIO configfs（wwn/tpg/attrib/acl）
   fcsim_cfs.c     独自 configfs（/sys/kernel/config/fcsim）
   fcsim_fault.c   障害注入ルール（hosts/<wwpn>/faults）
-tools/fcsim-targetcli
+tools/fcsim-targetcli, fcsim-targetctl, fcsim_rtslib.py   targetcli 連携
+tools/fcsimctl                                            initiator 側・ファブリックの CLI
 scripts/run-guest-test.sh   ゲストでテストを 1 本実行し、出力と dmesg を .test-out/ に残す
 tests/            virtme-ng ゲスト内で実行するテスト（make test で全部）
   smoke-fcsim.sh, smoke-fcsim-targetcli.sh   基本動作、targetcli 連携
@@ -226,6 +251,7 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test で
                                              dev_loss_tmo 設定、パスの自動復帰、全パスダウン時のキューイング
                                              （要 device-mapper-multipath、カーネルに SCSI_DH_ALUA / DM_MULTIPATH_ST）
   misc-fcsim.sh                              拒否ログの抑制、1 ページを超える一覧、TPG 属性
+  cli-fcsim.sh                               fcsimctl（作成・障害ルール・status・save/restore）と fc_host 統計
 ```
 
 ## 7. 段階
@@ -234,7 +260,7 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test で
 |---|---|
 | 1 (MVP) | 単一ファブリック・全対全、iport/tport、ログイン、rport・スキャン、READ/WRITE、link up/down、ABORT/LUN RESET、KASAN/lockdep 有効で作成〜削除〜rmmod がクリーン |
 | 2（済） | エクスチェンジ化、非同期 drain、TMR タイムアウト、target/host reset、`terminate_rport_io`（fast_io_fail_tmo）、障害注入（遅延・無応答・エラー応答）、RSCN、multipath テスト（2 iport × 2 tport） |
-| 3 | ゾーニング、NPIV（`vport_create`）、fc_host 統計、rtslib upstream、initiator 側 CLI |
+| 3 | `docs/stage3-plan.md` を参照。3a（済）: initiator 側 CLI、fc_host 統計。以降: 互換（WSL2 / AlmaLinux 9）、ゾーニング、NPIV |
 
 ## 8. 既知の制限
 

@@ -21,7 +21,8 @@ TESTS = \
 	"hang tests/hang-fcsim.sh" \
 	"multipath tests/multipath-fcsim.sh" \
 	"multipathd tests/multipathd-fcsim.sh" \
-	"misc tests/misc-fcsim.sh"
+	"misc tests/misc-fcsim.sh" \
+	"cli tests/cli-fcsim.sh"
 
 test: all
 	@rc=0; for t in $(TESTS); do scripts/run-guest-test.sh $$t || rc=1; done; exit $$rc

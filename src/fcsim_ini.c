@@ -46,6 +46,93 @@ static inline struct fcsim_iport *shost_to_iport(struct Scsi_Host *shost)
 	return *(struct fcsim_iport **)shost_priv(shost);
 }
 
+/* ------------------------------------------------------------- statistics */
+
+#define fcsim_stat_add(iport, field, n)	this_cpu_add((iport)->stats->field, (n))
+#define fcsim_stat_inc(iport, field)	fcsim_stat_add(iport, field, 1)
+
+/* SOF + frame header (6) + CRC + EOF */
+#define FCSIM_FRAME_OVERHEAD_WORDS	9
+#define FCSIM_FCP_CMND_LEN		32
+#define FCSIM_FCP_RSP_LEN		24
+
+/* Account one FC sequence of @bytes payload (at least one frame). */
+static void fcsim_stat_seq(struct fcsim_iport *iport, bool tx, u64 bytes)
+{
+	u64 frames = max_t(u64, 1, DIV_ROUND_UP(bytes, FCSIM_FRAME_SIZE));
+	u64 words = frames * FCSIM_FRAME_OVERHEAD_WORDS + DIV_ROUND_UP(bytes, 4);
+
+	if (tx) {
+		fcsim_stat_add(iport, tx_frames, frames);
+		fcsim_stat_add(iport, tx_words, words);
+	} else {
+		fcsim_stat_add(iport, rx_frames, frames);
+		fcsim_stat_add(iport, rx_words, words);
+	}
+}
+
+static void fcsim_stats_sum(struct fcsim_iport *iport, struct fcsim_stats *sum)
+{
+	int cpu;
+
+	memset(sum, 0, sizeof(*sum));
+	for_each_possible_cpu(cpu) {
+		const struct fcsim_stats *s = per_cpu_ptr(iport->stats, cpu);
+		const u64 *src = (const u64 *)s;
+		u64 *dst = (u64 *)sum;
+		unsigned int i;
+
+		for (i = 0; i < sizeof(*s) / sizeof(u64); i++)
+			dst[i] += READ_ONCE(src[i]);
+	}
+}
+
+static struct fc_host_statistics *fcsim_get_fc_host_stats(struct Scsi_Host *shost)
+{
+	struct fcsim_iport *iport = shost_to_iport(shost);
+	struct fc_host_statistics *fc = &iport->fc_stats;
+	struct fcsim_stats now, *b = &iport->stats_base;
+
+	fcsim_stats_sum(iport, &now);
+
+	spin_lock(&iport->stats_lock);
+	memset(fc, 0, sizeof(*fc));
+	fc->seconds_since_last_reset =
+		(jiffies - iport->stats_reset) / HZ;
+#define D(f) (now.f - b->f)
+	fc->tx_frames		= D(tx_frames);
+	fc->tx_words		= D(tx_words);
+	fc->rx_frames		= D(rx_frames);
+	fc->rx_words		= D(rx_words);
+	fc->lip_count		= D(lip_count);
+	fc->dumped_frames	= D(dumped_frames);
+	fc->link_failure_count	= D(link_failure_count);
+	fc->fcp_input_requests	= D(fcp_input_requests);
+	fc->fcp_output_requests	= D(fcp_output_requests);
+	fc->fcp_control_requests = D(fcp_control_requests);
+	fc->fcp_input_megabytes	= D(fcp_input_bytes) >> 20;
+	fc->fcp_output_megabytes = D(fcp_output_bytes) >> 20;
+	fc->fcp_packet_aborts	= D(fcp_packet_aborts);
+	fc->fc_xid_not_found	= D(fc_xid_not_found);
+#undef D
+	spin_unlock(&iport->stats_lock);
+
+	/* The transport reads one field right after this returns. */
+	return fc;
+}
+
+static void fcsim_reset_fc_host_stats(struct Scsi_Host *shost)
+{
+	struct fcsim_iport *iport = shost_to_iport(shost);
+	struct fcsim_stats now;
+
+	fcsim_stats_sum(iport, &now);
+	spin_lock(&iport->stats_lock);
+	iport->stats_base = now;
+	iport->stats_reset = jiffies;
+	spin_unlock(&iport->stats_lock);
+}
+
 /* ------------------------------------------------------------- exchanges */
 
 static struct kmem_cache *fcsim_cmd_cache;
@@ -272,9 +359,12 @@ bool fcsim_xchg_fetch_write_data(struct fcsim_cmd *cmd)
 
 	spin_lock_irqsave(&cmd->lock, flags);
 	if (cmd->sc) {
+		u32 len = min(se_cmd->data_length, scsi_bufflen(cmd->sc));
+
 		fcsim_sg_copy(se_cmd->t_data_sg, se_cmd->t_data_nents,
-			      scsi_sglist(cmd->sc), scsi_sg_count(cmd->sc),
-			      min(se_cmd->data_length, scsi_bufflen(cmd->sc)));
+			      scsi_sglist(cmd->sc), scsi_sg_count(cmd->sc), len);
+		fcsim_stat_seq(cmd->iport, true, len);
+		fcsim_stat_add(cmd->iport, fcp_output_bytes, len);
 		ok = true;
 	}
 	spin_unlock_irqrestore(&cmd->lock, flags);
@@ -290,13 +380,21 @@ void fcsim_xchg_status(struct fcsim_cmd *cmd, bool data_in)
 
 	spin_lock_irqsave(&cmd->lock, flags);
 	sc = cmd->sc;
-	if (!sc)
+	if (!sc) {
+		/* The initiator already terminated this exchange. */
+		fcsim_stat_inc(cmd->iport, fc_xid_not_found);
 		goto out;
+	}
 
-	if (data_in && se_cmd->t_data_sg)
+	if (data_in && se_cmd->t_data_sg) {
+		u32 len = min(se_cmd->data_length, scsi_bufflen(sc));
+
 		fcsim_sg_copy(scsi_sglist(sc), scsi_sg_count(sc),
-			      se_cmd->t_data_sg, se_cmd->t_data_nents,
-			      min(se_cmd->data_length, scsi_bufflen(sc)));
+			      se_cmd->t_data_sg, se_cmd->t_data_nents, len);
+		fcsim_stat_seq(cmd->iport, false, len);
+		fcsim_stat_add(cmd->iport, fcp_input_bytes, len);
+	}
+	fcsim_stat_seq(cmd->iport, false, FCSIM_FCP_RSP_LEN);	/* FCP_RSP */
 
 	if (se_cmd->sense_buffer &&
 	    (se_cmd->se_cmd_flags & (SCF_TRANSPORT_TASK_SENSE |
@@ -349,6 +447,7 @@ void fcsim_xchg_released(struct fcsim_cmd *cmd)
 		spin_unlock_irqrestore(&cmd->lock, flags);
 	} else if (cmd->drop_rsp) {
 		/* Fault: the response never arrives; EH has to deal with it. */
+		fcsim_stat_inc(cmd->iport, dumped_frames);
 		fcsim_hold_locked(cmd, 0);
 		spin_unlock_irqrestore(&cmd->lock, flags);
 	} else {
@@ -495,6 +594,17 @@ static int fcsim_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *sc)
 					 sizeof(cmd->cdb)));
 	cmd->drop_rsp = act.drop == FCSIM_DROP_RSP;
 
+	/* FCP_CMND leaves the HBA. */
+	if (cmd->dir == DMA_FROM_DEVICE && cmd->data_len)
+		fcsim_stat_inc(iport, fcp_input_requests);
+	else if (cmd->dir == DMA_TO_DEVICE && cmd->data_len)
+		fcsim_stat_inc(iport, fcp_output_requests);
+	else
+		fcsim_stat_inc(iport, fcp_control_requests);
+	fcsim_stat_seq(iport, true, FCSIM_FCP_CMND_LEN);
+	if (act.drop == FCSIM_DROP_CMD)
+		fcsim_stat_inc(iport, dumped_frames);
+
 	/* Once published, EH or a logout may terminate it at any time. */
 	kref_get(&cmd->kref);
 	WRITE_ONCE(p->cmd, cmd);
@@ -599,6 +709,8 @@ static int fcsim_eh_abort(struct scsi_cmnd *sc)
 	bool in_lio;
 	int ret;
 
+	fcsim_stat_inc(shost_to_iport(sc->device->host), fcp_packet_aborts);
+
 	ret = fc_block_scsi_eh(sc);
 	if (ret) {			/* FAST_IO_FAIL */
 		fcsim_terminate_sc(sc, DID_TRANSPORT_FAILFAST);
@@ -697,7 +809,8 @@ static int fcsim_eh_host_reset(struct scsi_cmnd *sc)
 	return SUCCESS;
 }
 
-static const struct scsi_host_template fcsim_sht = {
+/* Not const: older kernels (AlmaLinux 9) take a non-const template. */
+static struct scsi_host_template fcsim_sht = {
 	.module			= THIS_MODULE,
 	.name			= "tcm_fcsim virtual FC HBA",
 	.proc_name		= FCSIM_NAME,
@@ -743,6 +856,7 @@ static void fcsim_terminate_rport_io(struct fc_rport *rport)
  */
 static int fcsim_issue_lip(struct Scsi_Host *shost)
 {
+	fcsim_stat_inc(shost_to_iport(shost), lip_count);
 	fcsim_fabric_sync();
 	/* fc_user_scan(): only rports that are online, under host_lock. */
 	return shost->transportt->user_scan(shost, SCAN_WILD_CARD,
@@ -783,6 +897,8 @@ static struct fc_function_template fcsim_fc_functions = {
 	.show_starget_port_id		= 1,
 
 	.issue_fc_host_lip		= fcsim_issue_lip,
+	.get_fc_host_stats		= fcsim_get_fc_host_stats,
+	.reset_fc_host_stats		= fcsim_reset_fc_host_stats,
 };
 
 /* Caller holds fcsim_mutex (or the host is not yet visible). */
@@ -867,7 +983,14 @@ struct fcsim_iport *fcsim_iport_create(u64 wwpn)
 	INIT_LIST_HEAD(&iport->held_list);
 	INIT_LIST_HEAD(&iport->faults);
 	spin_lock_init(&iport->held_lock);
+	spin_lock_init(&iport->stats_lock);
 	atomic_set(&iport->ndraining, 0);
+	iport->stats = alloc_percpu(struct fcsim_stats);
+	if (!iport->stats) {
+		kfree(iport);
+		return ERR_PTR(-ENOMEM);
+	}
+	iport->stats_reset = jiffies;
 	iport->wwpn = wwpn;
 	iport->wwnn = fcsim_default_wwnn(wwpn);
 	iport->link_up = true;
@@ -924,6 +1047,7 @@ out_port_id:
 	fcsim_port_id_free(iport->port_id);
 out_unlock:
 	mutex_unlock(&fcsim_mutex);
+	free_percpu(iport->stats);
 	kfree(iport);
 	return ERR_PTR(ret);
 }
@@ -960,6 +1084,9 @@ void fcsim_iport_destroy(struct fcsim_iport *iport)
 	fc_remove_host(shost);
 	scsi_remove_host(shost);
 	scsi_host_put(shost);
+	/* Sessions are drained: no exchange can count any more. */
+	free_percpu(iport->stats);
+	iport->stats = NULL;
 	iport->shost = NULL;
 }
 
@@ -977,6 +1104,8 @@ void fcsim_iport_set_link(struct fcsim_iport *iport, bool up)
 	mutex_unlock(&fcsim_mutex);
 
 	pr_info("host%u: link %s\n", shost->host_no, up ? "up" : "down");
+	if (!up)
+		fcsim_stat_inc(iport, link_failure_count);
 	fc_host_post_event(shost, fc_get_event_number(),
 			   up ? FCH_EVT_LINKUP : FCH_EVT_LINKDOWN, 0);
 
