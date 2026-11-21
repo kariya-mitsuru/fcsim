@@ -863,6 +863,7 @@ struct fcsim_iport *fcsim_iport_create(u64 wwpn)
 
 	INIT_LIST_HEAD(&iport->nexus_list);
 	INIT_LIST_HEAD(&iport->draining_list);
+	INIT_LIST_HEAD(&iport->refused_list);
 	INIT_LIST_HEAD(&iport->held_list);
 	INIT_LIST_HEAD(&iport->faults);
 	spin_lock_init(&iport->held_lock);
@@ -948,6 +949,7 @@ void fcsim_iport_destroy(struct fcsim_iport *iport)
 
 	mutex_lock(&fcsim_mutex);
 	WARN_ON(!list_empty(&iport->nexus_list));
+	fcsim_forget_refusals(iport, NULL);
 	list_del(&iport->node);
 	fcsim_port_id_free(iport->port_id);
 	mutex_unlock(&fcsim_mutex);

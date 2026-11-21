@@ -48,6 +48,8 @@ FC HBA なしで「FC ストレージ」をエミュレーションする Linux 
 reconcile は「あるべき nexus 集合」と現状を突き合わせ、差分をログイン/ログアウトする。
 
 - あるべき nexus: iport が link up かつ削除中でない × tport が online、かつ LIO から close 要求されていない
+- target に拒否されたログイン（ACL 無し・demo mode 無効）は reconcile のたびに再試行するが、ログ（info）は
+  結果が変わったときだけ出す。記録はログイン成功・tport の online 状態の変化・iport の link down で消える
 - configfs の store/mkdir/rmdir や TPG enable/drop からは reconcile 完了まで待つ（同期）。
   ACL 作成・close_session など LIO のロックを持っている可能性がある経路からは起動のみ（非同期）
 
@@ -219,6 +221,7 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test で
   fault-fcsim.sh                             障害注入、fast_io_fail_tmo、RSCN / link イベント（fc-events.py）
   hang-fcsim.sh                              バックエンド停止（dmsetup suspend）時の EH とファブリックの応答性
   multipath-fcsim.sh                         2 iport × 2 tport の dm-multipath フェイルオーバとデータ整合性
+  misc-fcsim.sh                              拒否ログの抑制、1 ページを超える一覧、TPG 属性
 ```
 
 ## 7. 段階
@@ -241,4 +244,4 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test で
   `issue_lip` で再スキャンできる
 - 見える LUN が 1 つも無い間は SCSI 層が scsi_target を回収するため `fc_transport/target*` は現れない
   （rport は存在する。実機で LUN マスキングされていないアレイと同じ挙動）
-- `sessions` / `targets` 属性は 1 ページ（約 170 ポート）を超えると切り詰められる
+- `sessions` / `targets` 属性は configfs の 1 ページ（約 170 ポート）に収まらない分を `... N more` と表示する

@@ -19,7 +19,8 @@ TESTS = \
 	"race-close tests/race-fcsim.sh close" \
 	"fault tests/fault-fcsim.sh" \
 	"hang tests/hang-fcsim.sh" \
-	"multipath tests/multipath-fcsim.sh"
+	"multipath tests/multipath-fcsim.sh" \
+	"misc tests/misc-fcsim.sh"
 
 test: all
 	@rc=0; for t in $(TESTS); do scripts/run-guest-test.sh $$t || rc=1; done; exit $$rc

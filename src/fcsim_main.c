@@ -133,6 +133,101 @@ bool fcsim_wwpn_in_use(u64 wwpn)
 
 /* ------------------------------------------------------------- nexus */
 
+/* ------------------------------------------------------------- attributes */
+
+/*
+ * One WWN per line in a configfs attribute (one page).  Names that do not
+ * fit are counted in *more and reported by fcsim_emit_more().
+ */
+#define FCSIM_MORE_RESERVE	32
+
+ssize_t fcsim_emit_name(char *page, ssize_t len, const char *name,
+			unsigned int *more)
+{
+	if (len + strlen(name) + 1 + FCSIM_MORE_RESERVE > PAGE_SIZE) {
+		(*more)++;
+		return len;
+	}
+	return len + sysfs_emit_at(page, len, "%s\n", name);
+}
+
+ssize_t fcsim_emit_more(char *page, ssize_t len, unsigned int more)
+{
+	if (more)
+		len += sysfs_emit_at(page, len, "... %u more\n", more);
+	return len;
+}
+
+/* ------------------------------------------------------------- refusals */
+
+/*
+ * Logins the target refused (no ACL and demo mode off).  Every reconcile
+ * retries them, so only a change in the outcome is logged at info level.
+ */
+struct fcsim_refusal {
+	struct list_head	node;		/* iport->refused_list */
+	struct fcsim_tport	*tport;
+	int			err;
+};
+
+static struct fcsim_refusal *fcsim_refusal_find(struct fcsim_iport *iport,
+						struct fcsim_tport *tport)
+{
+	struct fcsim_refusal *r;
+
+	list_for_each_entry(r, &iport->refused_list, node)
+		if (r->tport == tport)
+			return r;
+	return NULL;
+}
+
+/* Returns true if this refusal is news (and should be logged). */
+static bool fcsim_note_refusal(struct fcsim_iport *iport,
+			       struct fcsim_tport *tport, int err)
+{
+	struct fcsim_refusal *r = fcsim_refusal_find(iport, tport);
+
+	if (r) {
+		if (r->err == err)
+			return false;
+		r->err = err;
+		return true;
+	}
+	r = kzalloc(sizeof(*r), GFP_KERNEL);
+	if (r) {
+		r->tport = tport;
+		r->err = err;
+		list_add_tail(&r->node, &iport->refused_list);
+	}
+	return true;
+}
+
+/*
+ * Forget refusals of @iport (all if @tport is NULL), or of @tport on every
+ * iport (if @iport is NULL).  Caller holds fcsim_mutex.
+ */
+void fcsim_forget_refusals(struct fcsim_iport *iport, struct fcsim_tport *tport)
+{
+	struct fcsim_refusal *r, *tmp;
+	struct fcsim_iport *ip;
+
+	lockdep_assert_held(&fcsim_mutex);
+
+	if (!iport) {
+		list_for_each_entry(ip, &fcsim_iports, node)
+			fcsim_forget_refusals(ip, tport);
+		return;
+	}
+	list_for_each_entry_safe(r, tmp, &iport->refused_list, node) {
+		if (tport && r->tport != tport)
+			continue;
+		list_del(&r->node);
+		kfree(r);
+	}
+}
+
+/* ------------------------------------------------------------- nexus */
+
 /* Caller holds rcu_read_lock(); used by the I/O path. */
 struct fcsim_nexus *fcsim_nexus_lookup_rcu(struct fcsim_iport *iport,
 					   u64 tport_wwpn)
@@ -180,11 +275,16 @@ static void fcsim_login(struct fcsim_iport *iport, struct fcsim_tport *tport)
 
 	ret = fcsim_tgt_login(nexus);
 	if (ret) {
-		pr_info("login %s -> %s rejected by target (%d)\n",
-			iport->name, tport->name, ret);
+		if (fcsim_note_refusal(iport, tport, ret))
+			pr_info("login %s -> %s rejected by target (%d)\n",
+				iport->name, tport->name, ret);
+		else
+			pr_debug("login %s -> %s still rejected (%d)\n",
+				 iport->name, tport->name, ret);
 		kfree(nexus);
 		return;
 	}
+	fcsim_forget_refusals(iport, tport);
 
 	/* Publish to the I/O path before the rport goes online. */
 	list_add_tail(&nexus->tport_node, &tport->nexus_list);
@@ -294,14 +394,18 @@ static void fcsim_reconcile(void)
 		if (online == tport->rscn_online)
 			continue;
 		tport->rscn_online = online;
+		/* A new appearance of the port: report refusals afresh. */
+		fcsim_forget_refusals(NULL, tport);
 		list_for_each_entry(iport, &fcsim_iports, node)
 			if (iport->link_up && !iport->removing)
 				fcsim_post_rscn(iport, tport->port_id);
 	}
 
 	list_for_each_entry(iport, &fcsim_iports, node) {
-		if (!iport->link_up || iport->removing)
+		if (!iport->link_up || iport->removing) {
+			fcsim_forget_refusals(iport, NULL);
 			continue;
+		}
 		list_for_each_entry(tport, &fcsim_tports, node) {
 			if (!fcsim_tport_online(tport))
 				continue;

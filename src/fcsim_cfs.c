@@ -90,13 +90,14 @@ static ssize_t fcsim_host_targets_show(struct config_item *item, char *page)
 {
 	struct fcsim_iport *iport = to_iport(item);
 	struct fcsim_nexus *nexus;
+	unsigned int more = 0;
 	ssize_t len = 0;
 
 	mutex_lock(&fcsim_mutex);
 	list_for_each_entry(nexus, &iport->nexus_list, iport_node)
-		len += sysfs_emit_at(page, len, "%s\n", nexus->tport->name);
+		len = fcsim_emit_name(page, len, nexus->tport->name, &more);
 	mutex_unlock(&fcsim_mutex);
-	return len;
+	return fcsim_emit_more(page, len, more);
 }
 
 static ssize_t fcsim_host_draining_show(struct config_item *item, char *page)

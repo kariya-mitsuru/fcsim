@@ -249,29 +249,33 @@ static u16 fcsim_tpg_get_tag(struct se_portal_group *se_tpg)
 	return FCSIM_TPGT;
 }
 
+/*
+ * TPG attributes are written under fcsim_mutex but read locklessly by LIO,
+ * which calls these with its own locks held.
+ */
 static int fcsim_check_demo_mode(struct se_portal_group *se_tpg)
 {
-	return tpg_to_tport(se_tpg)->attrib.generate_node_acls;
+	return READ_ONCE(tpg_to_tport(se_tpg)->attrib.generate_node_acls);
 }
 
 static int fcsim_check_demo_mode_cache(struct se_portal_group *se_tpg)
 {
-	return tpg_to_tport(se_tpg)->attrib.cache_dynamic_acls;
+	return READ_ONCE(tpg_to_tport(se_tpg)->attrib.cache_dynamic_acls);
 }
 
 static int fcsim_check_demo_write_protect(struct se_portal_group *se_tpg)
 {
-	return tpg_to_tport(se_tpg)->attrib.demo_mode_write_protect;
+	return READ_ONCE(tpg_to_tport(se_tpg)->attrib.demo_mode_write_protect);
 }
 
 static int fcsim_check_prod_write_protect(struct se_portal_group *se_tpg)
 {
-	return tpg_to_tport(se_tpg)->attrib.prod_mode_write_protect;
+	return READ_ONCE(tpg_to_tport(se_tpg)->attrib.prod_mode_write_protect);
 }
 
 static int fcsim_check_demo_mode_login_only(struct se_portal_group *se_tpg)
 {
-	return tpg_to_tport(se_tpg)->attrib.demo_mode_login_only;
+	return READ_ONCE(tpg_to_tport(se_tpg)->attrib.demo_mode_login_only);
 }
 
 static struct se_portal_group *fcsim_make_tpg(struct se_wwn *wwn,
@@ -364,7 +368,7 @@ static ssize_t fcsim_tpg_attrib_##_name##_show(struct config_item *item,	\
 {									\
 	struct fcsim_tport *tport = tpg_to_tport(attrib_to_tpg(item));	\
 									\
-	return sysfs_emit(page, "%d\n", tport->attrib._name);		\
+	return sysfs_emit(page, "%d\n", READ_ONCE(tport->attrib._name));	\
 }									\
 									\
 static ssize_t fcsim_tpg_attrib_##_name##_store(struct config_item *item, \
@@ -378,7 +382,10 @@ static ssize_t fcsim_tpg_attrib_##_name##_store(struct config_item *item, \
 	ret = kstrtobool(page, &val);					\
 	if (ret)							\
 		return ret;						\
-	tport->attrib._name = val;					\
+	mutex_lock(&fcsim_mutex);					\
+	WRITE_ONCE(tport->attrib._name, val);				\
+	mutex_unlock(&fcsim_mutex);					\
+	/* e.g. demo mode turned on: refused initiators may log in */	\
 	fcsim_fabric_kick();						\
 	return count;							\
 }									\
@@ -494,13 +501,14 @@ static ssize_t fcsim_tpg_sessions_show(struct config_item *item, char *page)
 {
 	struct fcsim_tport *tport = tpg_to_tport(to_tpg(item));
 	struct fcsim_nexus *nexus;
+	unsigned int more = 0;
 	ssize_t len = 0;
 
 	mutex_lock(&fcsim_mutex);
 	list_for_each_entry(nexus, &tport->nexus_list, tport_node)
-		len += sysfs_emit_at(page, len, "%s\n", nexus->iport->name);
+		len = fcsim_emit_name(page, len, nexus->iport->name, &more);
 	mutex_unlock(&fcsim_mutex);
-	return len;
+	return fcsim_emit_more(page, len, more);
 }
 
 CONFIGFS_ATTR_RO(fcsim_tpg_, node_name);

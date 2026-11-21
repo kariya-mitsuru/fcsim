@@ -96,6 +96,7 @@ struct fcsim_iport {
 	bool			removing;
 	struct list_head	nexus_list;
 	struct list_head	draining_list;	/* logged out, session not yet drained */
+	struct list_head	refused_list;	/* logins the target refused (fcsim_main.c) */
 	atomic_t		ndraining;	/* logged-out sessions still draining */
 
 	/* Commands held by the fabric (delayed / dropped), see fcsim_ini.c. */
@@ -191,6 +192,10 @@ extern struct device *fcsim_root_dev;
 void fcsim_fabric_kick(void);
 void fcsim_fabric_sync(void);
 void fcsim_wait_drained(atomic_t *ndraining);
+void fcsim_forget_refusals(struct fcsim_iport *iport, struct fcsim_tport *tport);
+ssize_t fcsim_emit_name(char *page, ssize_t len, const char *name,
+			unsigned int *more);
+ssize_t fcsim_emit_more(char *page, ssize_t len, unsigned int more);
 int fcsim_port_id_alloc(u32 *port_id);
 void fcsim_port_id_free(u32 port_id);
 bool fcsim_wwpn_in_use(u64 wwpn);
