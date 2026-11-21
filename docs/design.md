@@ -62,6 +62,11 @@ reconcile は「あるべき nexus 集合」と現状を突き合わせ、差分
 2. nexus を RCU リストから外し `synchronize_rcu()`
 3. `target_stop_session` → `target_wait_for_sess_cmds` → `target_remove_session`
 
+LIO の `close_session`（ACL 削除等）との排他: `target_shutdown_sessions` は `nacl_sess_lock` の下で
+未停止のセッションを ACL のリストから外し、ロックを外してから `close_session` を呼ぶ。
+ログアウト側は同じロックの下で `target_stop_session` し、セッションが既にリストから外れていれば
+`close_session` 実行中とみなして、その完了（nexus の `close_done`）を待ってから解放する。
+
 同じ WWPN で dev_loss_tmo 内に再ログインすると transport は同じ rport / SCSI target を再利用する（multipath の path 復旧と同じ挙動）。
 
 nexus の検索は `rport->dd_data` を使わず、iport の nexus リストを相手 WWPN で RCU 検索する
@@ -85,6 +90,12 @@ LIO 完了
 - `se_cmd` とセンスバッファは `scsi_cmd_priv(sc)`（`cmd_size`）に置き、追加割り当て無し
 - エラー処理: `eh_timed_out = fc_eh_timed_out`、`eh_abort_handler` → `TMR_ABORT_TASK`、
   `eh_device_reset_handler` → `TMR_LUN_RESET`（いずれも先に `fc_block_scsi_eh`）
+- EH が SUCCESS / FAST_IO_FAIL を返すとミッドレイヤはその sc を即座に再発行しうる（`fcsim_cmd` を再利用）。
+  LIO は state list から外した後に `release_cmd` を呼ぶため、TMR の応答（特に `TASK_DOES_NOT_EXIST`）
+  だけではコマンドが解放済みとは限らない。そこで:
+  - 完了は `fcsim_cmd_done()` に集約し、RCU read 区間内で `released` を立ててから `scsi_done`
+  - EH は対象コマンド（LUN RESET なら当該 LUN の全コマンド）の `released` を待ち（上限 30 秒）、
+    `synchronize_rcu()` で `scsi_done` の実行中を待ってから SUCCESS を返す。待ち切れなければ FAILED
 
 ## 5. 設定インターフェース
 
@@ -137,7 +148,8 @@ src/
   fcsim_tgt.c     target_core_fabric_ops、LIO configfs（wwn/tpg/attrib/acl）
   fcsim_cfs.c     独自 configfs（/sys/kernel/config/fcsim）
 tools/fcsim-targetcli
-tests/            virtme-ng ゲスト内で実行するテスト
+tests/            virtme-ng ゲスト内で実行するテスト（race-fcsim.sh はテスト専用モジュールパラメータ
+                  dbg_release_delay_ms / dbg_close_delay_ms で競合の窓を広げる回帰テスト）
 ```
 
 ## 7. 段階
@@ -150,7 +162,9 @@ tests/            virtme-ng ゲスト内で実行するテスト
 
 ## 8. 既知の制限（段階 1）
 
-- LIO の `close_session` と自前のログアウトがごく短い窓で競合した場合の扱いは他の LIO fabric と同程度（厳密化は段階 2）
+- バックエンドが応答しなくなると、`fcsim_mutex` を持ったままのセッション drain と上限の無い TMR 待ちで
+  ファブリック操作全体が止まる（段階 2 でタイムアウト化）
+- `eh_target_reset_handler` / `eh_host_reset_handler` は未実装（段階 2）
 - T10-PI（DIF/DIX）は非対応
 - LUN マップ変更時の自動再スキャンはしない（実機同様、LIO が REPORTED LUNS DATA HAS CHANGED の UA を返すのみ）。
   `issue_lip` で再スキャンできる

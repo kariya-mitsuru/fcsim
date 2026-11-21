@@ -10,6 +10,8 @@
 
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/delay.h>
+#include <linux/jiffies.h>
 #include <linux/blk-mq.h>
 #include <scsi/scsi.h>
 #include <scsi/scsi_cmnd.h>
@@ -23,12 +25,91 @@
 
 static struct scsi_transport_template *fcsim_transport;
 
+/* How long EH waits for the target side to release aborted/reset commands. */
+#define FCSIM_EH_RELEASE_TMO	(30 * HZ)
+
 static inline struct fcsim_iport *shost_to_iport(struct Scsi_Host *shost)
 {
 	return *(struct fcsim_iport **)shost_priv(shost);
 }
 
 /* ------------------------------------------------------------- I/O path */
+
+/*
+ * Final completion of an I/O command, once the target side no longer
+ * references it.  If the command timed out, scsi_done() is a no-op and SCSI
+ * EH owns it; EH waits for ->released and then for an RCU grace period, so
+ * it cannot hand the command back to the midlayer (which may requeue it)
+ * while this scsi_done() call is still in progress.
+ */
+void fcsim_cmd_done(struct fcsim_cmd *cmd)
+{
+	struct scsi_cmnd *sc = cmd->sc;
+
+	rcu_read_lock();
+	smp_store_release(&cmd->released, true);
+	scsi_done(sc);
+	rcu_read_unlock();
+}
+
+static bool fcsim_cmd_released(struct scsi_cmnd *sc)
+{
+	struct fcsim_cmd *cmd = scsi_cmd_priv(sc);
+
+	return smp_load_acquire(&cmd->released);
+}
+
+struct fcsim_busy_iter {
+	struct scsi_device	*sdev;
+	bool			busy;
+};
+
+static bool fcsim_sdev_busy_fn(struct scsi_cmnd *sc, void *data)
+{
+	struct fcsim_busy_iter *it = data;
+
+	if (sc->device == it->sdev && !fcsim_cmd_released(sc)) {
+		it->busy = true;
+		return false;
+	}
+	return true;
+}
+
+/* Are commands on @sdev still held by the target side? */
+static bool fcsim_sdev_released(struct scsi_device *sdev)
+{
+	struct fcsim_busy_iter it = { .sdev = sdev };
+
+	scsi_host_busy_iter(sdev->host, fcsim_sdev_busy_fn, &it);
+	return !it.busy;
+}
+
+/*
+ * Wait until @sc (or, with @sc == NULL, every command on @sdev) has been
+ * released by the target side.  A TMR response alone does not guarantee
+ * that: LIO takes a command off the device state list before it calls
+ * release_cmd, and ABORT_TASK answers TASK_DOES_NOT_EXIST in between.
+ */
+static bool fcsim_eh_wait_released(struct scsi_device *sdev,
+				   struct scsi_cmnd *sc, unsigned long tmo)
+{
+	unsigned long deadline = jiffies + tmo;
+
+	for (;;) {
+		if (sc ? fcsim_cmd_released(sc) : fcsim_sdev_released(sdev))
+			break;
+		if (time_after_eq(jiffies, deadline)) {
+			sdev_printk(KERN_WARNING, sdev,
+				    "target did not release %s\n",
+				    sc ? "the aborted command" : "reset commands");
+			return false;
+		}
+		msleep(10);
+	}
+	/* Wait for any fcsim_cmd_done() still inside scsi_done(). */
+	synchronize_rcu();
+	return true;
+}
 
 static int fcsim_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *sc)
 {
@@ -38,6 +119,9 @@ static int fcsim_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *sc)
 	struct se_cmd *se_cmd = &cmd->se_cmd;
 	struct fcsim_nexus *nexus;
 	int ret;
+
+	memset(cmd, 0, sizeof(*cmd));
+	cmd->sc = sc;
 
 	if (!rport) {
 		set_host_byte(sc, DID_NO_CONNECT);
@@ -49,8 +133,6 @@ static int fcsim_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *sc)
 		goto done;
 	}
 
-	memset(cmd, 0, sizeof(*cmd));
-	cmd->sc = sc;
 	se_cmd->tag = blk_mq_unique_tag(scsi_cmd_to_rq(sc));
 
 	rcu_read_lock();
@@ -80,7 +162,7 @@ static int fcsim_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *sc)
 	return 0;
 
 done:
-	scsi_done(sc);
+	fcsim_cmd_done(cmd);
 	return 0;
 }
 
@@ -123,35 +205,51 @@ static int fcsim_issue_tmr(struct scsi_cmnd *sc, u64 tag,
 	return ret;
 }
 
+/*
+ * Any result other than FAILED hands sc back to the midlayer, which may
+ * requeue it right away (reusing the fcsim_cmd), so first make sure the
+ * target side is completely done with it.
+ */
 static int fcsim_eh_abort(struct scsi_cmnd *sc)
 {
+	unsigned long tmo = 0;
 	int ret;
 
 	ret = fc_block_scsi_eh(sc);
-	if (ret)
-		return ret;
+	if (ret)	/* FAST_IO_FAIL */
+		return fcsim_eh_wait_released(sc->device, sc,
+					      FCSIM_EH_RELEASE_TMO) ? ret : FAILED;
 
-	ret = fcsim_issue_tmr(sc, blk_mq_unique_tag(scsi_cmd_to_rq(sc)),
-			      TMR_ABORT_TASK);
-	/*
-	 * TASK_DOES_NOT_EXIST: the target already completed and released the
-	 * command, so it no longer references sc.
-	 */
-	if (ret == TMR_FUNCTION_COMPLETE || ret == TMR_TASK_DOES_NOT_EXIST)
-		return SUCCESS;
-	return FAILED;
+	if (!fcsim_cmd_released(sc)) {
+		ret = fcsim_issue_tmr(sc, blk_mq_unique_tag(scsi_cmd_to_rq(sc)),
+				      TMR_ABORT_TASK);
+		/*
+		 * COMPLETE: LIO released it before answering.
+		 * TASK_DOES_NOT_EXIST: completed, release may still be pending.
+		 * Anything else: only succeed if it is already gone.
+		 */
+		if (ret == TMR_FUNCTION_COMPLETE || ret == TMR_TASK_DOES_NOT_EXIST)
+			tmo = FCSIM_EH_RELEASE_TMO;
+	}
+	return fcsim_eh_wait_released(sc->device, sc, tmo) ? SUCCESS : FAILED;
 }
 
 static int fcsim_eh_device_reset(struct scsi_cmnd *sc)
 {
+	struct scsi_device *sdev = sc->device;
 	int ret;
 
 	ret = fc_block_scsi_eh(sc);
-	if (ret)
-		return ret;
+	if (ret)	/* FAST_IO_FAIL */
+		return fcsim_eh_wait_released(sdev, NULL,
+					      FCSIM_EH_RELEASE_TMO) ? ret : FAILED;
 
 	ret = fcsim_issue_tmr(sc, 0, TMR_LUN_RESET);
-	return ret == TMR_FUNCTION_COMPLETE ? SUCCESS : FAILED;
+	if (ret != TMR_FUNCTION_COMPLETE)
+		return FAILED;
+	/* EH now completes every failed command on this LUN. */
+	return fcsim_eh_wait_released(sdev, NULL, FCSIM_EH_RELEASE_TMO) ?
+		SUCCESS : FAILED;
 }
 
 static const struct scsi_host_template fcsim_sht = {

@@ -49,6 +49,8 @@ struct fcsim_nexus {
 	struct fc_rport		*rport;		/* valid while logged in */
 	u32			index;
 	bool			closing;	/* LIO asked us to close it */
+	/* Signalled when LIO's close_session() no longer touches us. */
+	struct completion	close_done;
 };
 
 /* Initiator port: one virtual HBA port = one Scsi_Host. */
@@ -92,6 +94,13 @@ struct fcsim_tport {
 struct fcsim_cmd {
 	struct se_cmd		se_cmd;
 	struct scsi_cmnd	*sc;		/* NULL for TMRs */
+	/*
+	 * Set (inside an RCU read section that also covers scsi_done()) once
+	 * the target side is completely done with this command.  SCSI EH
+	 * waits for it before handing a timed-out command back to the
+	 * midlayer, which may then reuse it.
+	 */
+	bool			released;
 	struct completion	tmr_done;
 	unsigned char		sense_buf[TRANSPORT_SENSE_BUFFER];
 };
@@ -122,6 +131,7 @@ void fcsim_iport_destroy(struct fcsim_iport *iport);
 void fcsim_iport_set_link(struct fcsim_iport *iport, bool up);
 int fcsim_iport_set_wwnn(struct fcsim_iport *iport, u64 wwnn);
 int fcsim_rport_add(struct fcsim_nexus *nexus);
+void fcsim_cmd_done(struct fcsim_cmd *cmd);
 void fcsim_rport_delete(struct fcsim_nexus *nexus);
 
 /* fcsim_tgt.c: target side (LIO fabric) */

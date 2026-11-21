@@ -10,6 +10,8 @@
 #define pr_fmt(fmt) "tcm_fcsim: " fmt
 
 #include <linux/module.h>
+#include <linux/moduleparam.h>
+#include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <scsi/scsi_cmnd.h>
@@ -21,6 +23,20 @@
 #include "fcsim.h"
 
 static const struct target_core_fabric_ops fcsim_ops;
+
+/*
+ * Test-only knobs that widen race windows (tests/race-fcsim.sh).  Both are 0
+ * (off) by default.
+ */
+static unsigned int dbg_release_delay_ms;
+module_param(dbg_release_delay_ms, uint, 0644);
+MODULE_PARM_DESC(dbg_release_delay_ms,
+		 "test only: delay freeing the next completed READ (one-shot)");
+
+static unsigned int dbg_close_delay_ms;
+module_param(dbg_close_delay_ms, uint, 0644);
+MODULE_PARM_DESC(dbg_close_delay_ms,
+		 "test only: sleep at the start of close_session");
 
 static inline struct fcsim_tport *tpg_to_tport(struct se_portal_group *se_tpg)
 {
@@ -60,8 +76,26 @@ int fcsim_tgt_login(struct fcsim_nexus *nexus)
 void fcsim_tgt_logout(struct fcsim_nexus *nexus)
 {
 	struct se_session *se_sess = nexus->se_sess;
+	struct se_node_acl *nacl = se_sess->se_node_acl;
+	unsigned long flags;
+	bool close_in_flight;
 
+	/*
+	 * target_shutdown_sessions() picks a session that is not stopped off
+	 * the ACL's list under nacl_sess_lock, drops the lock and then calls
+	 * close_session().  Stopping the session under the same lock makes
+	 * the two exclusive: either LIO has already taken the session off the
+	 * list (close_session() is running or about to run, so wait for it
+	 * before the session and nexus are freed), or it will skip it.
+	 * target_stop_session() does not sleep.
+	 */
+	spin_lock_irqsave(&nacl->nacl_sess_lock, flags);
 	target_stop_session(se_sess);
+	close_in_flight = list_empty(&se_sess->sess_acl_list);
+	spin_unlock_irqrestore(&nacl->nacl_sess_lock, flags);
+	if (close_in_flight)
+		wait_for_completion(&nexus->close_done);
+
 	target_wait_for_sess_cmds(se_sess);
 	target_remove_session(se_sess);
 	nexus->se_sess = NULL;
@@ -70,10 +104,17 @@ void fcsim_tgt_logout(struct fcsim_nexus *nexus)
 /* LIO wants the session gone (e.g. its ACL is being deleted). */
 static void fcsim_close_session(struct se_session *se_sess)
 {
-	struct fcsim_nexus *nexus = se_sess->fabric_sess_ptr;
+	struct fcsim_nexus *nexus;
+	unsigned int delay = READ_ONCE(dbg_close_delay_ms);
 
+	if (delay)
+		msleep(delay);
+
+	nexus = se_sess->fabric_sess_ptr;
 	WRITE_ONCE(nexus->closing, true);
 	fcsim_fabric_kick();
+	/* Last access: the nexus and session may be freed right after this. */
+	complete(&nexus->close_done);
 }
 
 static u32 fcsim_sess_get_index(struct se_session *se_sess)
@@ -87,6 +128,23 @@ static u32 fcsim_sess_get_index(struct se_session *se_sess)
 
 static int fcsim_check_stop_free(struct se_cmd *se_cmd)
 {
+	/*
+	 * LIO calls this after taking the command off the device state list
+	 * but before release_cmd, i.e. inside the window where ABORT_TASK
+	 * answers TASK_DOES_NOT_EXIST for a command that is still alive.
+	 * One-shot: only the next READ is delayed.
+	 */
+	if (READ_ONCE(dbg_release_delay_ms) && se_cmd->t_task_cdb &&
+	    (se_cmd->t_task_cdb[0] == READ_10 || se_cmd->t_task_cdb[0] == READ_16)) {
+		unsigned int delay = xchg(&dbg_release_delay_ms, 0);
+
+		/* Sleep when we can, so the CPU's blk-mq timeout work still runs. */
+		if (delay && preemptible())
+			msleep(delay);
+		else if (delay)
+			mdelay(delay);
+	}
+
 	return transport_generic_free_cmd(se_cmd, 0);
 }
 
@@ -97,7 +155,7 @@ static void fcsim_release_cmd(struct se_cmd *se_cmd)
 	if (se_cmd->se_cmd_flags & SCF_SCSI_TMR_CDB)
 		kfree(cmd);
 	else
-		scsi_done(cmd->sc);
+		fcsim_cmd_done(cmd);
 }
 
 static int fcsim_write_pending(struct se_cmd *se_cmd)

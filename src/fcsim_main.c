@@ -168,6 +168,7 @@ static void fcsim_login(struct fcsim_iport *iport, struct fcsim_tport *tport)
 	nexus->tport = tport;
 	nexus->tport_wwpn = tport->wwpn;
 	nexus->index = ++fcsim_nexus_index;
+	init_completion(&nexus->close_done);
 
 	ret = fcsim_tgt_login(nexus);
 	if (ret) {
