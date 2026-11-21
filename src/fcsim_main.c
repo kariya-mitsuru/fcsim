@@ -6,6 +6,12 @@
  * (tports) and decides which (iport, tport) pairs are logged in.  All state
  * changes are made under fcsim_mutex and then "reconciled" on a single
  * ordered workqueue, which performs the actual logins/logouts.
+ *
+ * A logout terminates the initiator's exchanges and unpublishes the nexus
+ * under fcsim_mutex; draining its LIO session (which waits for commands
+ * inside the backend) runs on a separate workqueue, so one stuck backend
+ * does not stall the whole fabric.  The same pair logs in again only once
+ * the old session is gone, so its old commands cannot overtake new ones.
  */
 #define pr_fmt(fmt) "tcm_fcsim: " fmt
 
@@ -29,7 +35,9 @@ u64 fcsim_fabric_wwn = 0x100000fc5f000001ULL;
 struct device *fcsim_root_dev;
 
 static DEFINE_IDA(fcsim_port_ida);
-static struct workqueue_struct *fcsim_wq;
+static struct workqueue_struct *fcsim_wq;	/* ordered: reconcile */
+static struct workqueue_struct *fcsim_drain_wq;	/* session drains */
+static DECLARE_WAIT_QUEUE_HEAD(fcsim_drain_waitq);
 static u32 fcsim_nexus_index;
 
 static void fcsim_fabric_work_fn(struct work_struct *work);
@@ -198,21 +206,72 @@ static void fcsim_login(struct fcsim_iport *iport, struct fcsim_tport *tport)
 		iport->name, tport->name, tport->port_id);
 }
 
-/* LOGO equivalent. */
+/* Wait until every logged-out session counted in @ndraining is gone. */
+void fcsim_wait_drained(atomic_t *ndraining)
+{
+	wait_event(fcsim_drain_waitq, !atomic_read(ndraining));
+}
+
+static void fcsim_drain_work_fn(struct work_struct *work)
+{
+	struct fcsim_nexus *nexus = container_of(work, struct fcsim_nexus,
+						 drain_work);
+	/* The ports stay alive until their ndraining drops to zero. */
+	atomic_t *tport_cnt = &nexus->tport->ndraining;
+	atomic_t *iport_cnt = &nexus->iport->ndraining;
+
+	/* After this no I/O path lookup can still be using the nexus. */
+	synchronize_rcu();
+
+	/* Waits for commands still inside LIO / the backend. */
+	fcsim_tgt_logout(nexus);
+	pr_debug("session %u drained\n", nexus->index);
+
+	mutex_lock(&fcsim_mutex);
+	list_del(&nexus->drain_node);
+	mutex_unlock(&fcsim_mutex);
+	kfree(nexus);
+
+	atomic_dec(tport_cnt);
+	atomic_dec(iport_cnt);
+	wake_up_all(&fcsim_drain_waitq);
+
+	/* The pair may log in again. */
+	fcsim_fabric_kick();
+}
+
+static bool fcsim_pair_draining(struct fcsim_iport *iport,
+				struct fcsim_tport *tport)
+{
+	struct fcsim_nexus *nexus;
+
+	list_for_each_entry(nexus, &iport->draining_list, drain_node)
+		if (nexus->tport == tport)
+			return true;
+	return false;
+}
+
+/* LOGO equivalent.  The session is drained asynchronously. */
 static void fcsim_logout(struct fcsim_nexus *nexus)
 {
-	pr_info("logout %s -> %s\n", nexus->iport->name, nexus->tport->name);
+	struct fcsim_iport *iport = nexus->iport;
+
+	pr_info("logout %s -> %s\n", iport->name, nexus->tport->name);
 
 	/* Block new I/O at the SCSI layer first; dev_loss_tmo starts here. */
 	fcsim_rport_delete(nexus);
 
 	list_del_rcu(&nexus->iport_node);
 	list_del(&nexus->tport_node);
-	synchronize_rcu();
+	list_add_tail(&nexus->drain_node, &iport->draining_list);
 
-	/* No new commands can find the session now; drain and remove it. */
-	fcsim_tgt_logout(nexus);
-	kfree(nexus);
+	/* LOGO implicitly aborts every open exchange of this login. */
+	fcsim_terminate_tport(iport, nexus->tport_wwpn);
+
+	atomic_inc(&nexus->tport->ndraining);
+	atomic_inc(&iport->ndraining);
+	INIT_WORK(&nexus->drain_work, fcsim_drain_work_fn);
+	queue_work(fcsim_drain_wq, &nexus->drain_work);
 }
 
 static void fcsim_reconcile(void)
@@ -228,13 +287,26 @@ static void fcsim_reconcile(void)
 			if (!fcsim_nexus_wanted(nexus))
 				fcsim_logout(nexus);
 
+	/* RSCN: tell the initiators about target ports joining or leaving. */
+	list_for_each_entry(tport, &fcsim_tports, node) {
+		bool online = fcsim_tport_online(tport);
+
+		if (online == tport->rscn_online)
+			continue;
+		tport->rscn_online = online;
+		list_for_each_entry(iport, &fcsim_iports, node)
+			if (iport->link_up && !iport->removing)
+				fcsim_post_rscn(iport, tport->port_id);
+	}
+
 	list_for_each_entry(iport, &fcsim_iports, node) {
 		if (!iport->link_up || iport->removing)
 			continue;
 		list_for_each_entry(tport, &fcsim_tports, node) {
 			if (!fcsim_tport_online(tport))
 				continue;
-			if (fcsim_nexus_find(iport, tport))
+			if (fcsim_nexus_find(iport, tport) ||
+			    fcsim_pair_draining(iport, tport))
 				continue;
 			fcsim_login(iport, tport);
 		}
@@ -276,6 +348,12 @@ static int __init fcsim_init(void)
 	fcsim_wq = alloc_ordered_workqueue("fcsim_fabric", WQ_MEM_RECLAIM);
 	if (!fcsim_wq)
 		return -ENOMEM;
+	fcsim_drain_wq = alloc_workqueue("fcsim_drain",
+					 WQ_UNBOUND | WQ_MEM_RECLAIM, 0);
+	if (!fcsim_drain_wq) {
+		ret = -ENOMEM;
+		goto out_wq;
+	}
 
 	fcsim_root_dev = root_device_register(FCSIM_NAME);
 	if (IS_ERR(fcsim_root_dev)) {
@@ -305,6 +383,8 @@ out_ini:
 out_root:
 	root_device_unregister(fcsim_root_dev);
 out_wq:
+	if (fcsim_drain_wq)
+		destroy_workqueue(fcsim_drain_wq);
 	destroy_workqueue(fcsim_wq);
 	return ret;
 }
@@ -316,6 +396,7 @@ static void __exit fcsim_exit(void)
 	fcsim_tgt_exit();
 	fcsim_ini_exit();
 	root_device_unregister(fcsim_root_dev);
+	destroy_workqueue(fcsim_drain_wq);
 	destroy_workqueue(fcsim_wq);
 	ida_destroy(&fcsim_port_ida);
 	pr_info("unloaded\n");

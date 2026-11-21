@@ -72,7 +72,10 @@ int fcsim_tgt_login(struct fcsim_nexus *nexus)
 	return 0;
 }
 
-/* Caller holds fcsim_mutex; the nexus is no longer reachable from the I/O path. */
+/*
+ * Drain worker, without fcsim_mutex: the nexus is no longer reachable from
+ * the I/O path.  May wait for commands stuck in the backend.
+ */
 void fcsim_tgt_logout(struct fcsim_nexus *nexus)
 {
 	struct se_session *se_sess = nexus->se_sess;
@@ -148,63 +151,90 @@ static int fcsim_check_stop_free(struct se_cmd *se_cmd)
 	return transport_generic_free_cmd(se_cmd, 0);
 }
 
+static inline struct fcsim_cmd *to_cmd(struct se_cmd *se_cmd)
+{
+	return container_of(se_cmd, struct fcsim_cmd, se_cmd);
+}
+
 static void fcsim_release_cmd(struct se_cmd *se_cmd)
 {
-	struct fcsim_cmd *cmd = container_of(se_cmd, struct fcsim_cmd, se_cmd);
+	struct fcsim_cmd *cmd = to_cmd(se_cmd);
 
 	if (se_cmd->se_cmd_flags & SCF_SCSI_TMR_CDB)
-		kfree(cmd);
+		fcsim_xchg_put(cmd);	/* LIO's reference; EH holds its own */
 	else
-		fcsim_cmd_done(cmd);
+		fcsim_xchg_released(cmd);
 }
 
 static int fcsim_write_pending(struct se_cmd *se_cmd)
 {
-	/* WRITE data is already in the initiator's scatterlist. */
-	target_execute_cmd(se_cmd);
-	return 0;
-}
-
-static int fcsim_complete(struct se_cmd *se_cmd, u8 status)
-{
-	struct fcsim_cmd *cmd = container_of(se_cmd, struct fcsim_cmd, se_cmd);
-	struct scsi_cmnd *sc = cmd->sc;
-
-	if (se_cmd->sense_buffer &&
-	    (se_cmd->se_cmd_flags & (SCF_TRANSPORT_TASK_SENSE |
-				     SCF_EMULATED_TASK_SENSE))) {
-		memcpy(sc->sense_buffer, se_cmd->sense_buffer,
-		       SCSI_SENSE_BUFFERSIZE);
-		sc->result = SAM_STAT_CHECK_CONDITION;
-	} else {
-		sc->result = status;
+	/* "XFER_RDY": pull the data from the initiator, if still there. */
+	if (!fcsim_xchg_fetch_write_data(to_cmd(se_cmd))) {
+		/* The initiator terminated the exchange: no data will come. */
+		transport_generic_request_failure(se_cmd,
+						  TCM_CHECK_CONDITION_ABORT_CMD);
+		return 0;
 	}
-	set_host_byte(sc, DID_OK);
-
-	if (se_cmd->se_cmd_flags & (SCF_OVERFLOW_BIT | SCF_UNDERFLOW_BIT))
-		scsi_set_resid(sc, se_cmd->residual_count);
+	target_execute_cmd(se_cmd);
 	return 0;
 }
 
 static int fcsim_queue_data_in(struct se_cmd *se_cmd)
 {
-	return fcsim_complete(se_cmd, SAM_STAT_GOOD);
+	fcsim_xchg_status(to_cmd(se_cmd), true);
+	return 0;
 }
 
 static int fcsim_queue_status(struct se_cmd *se_cmd)
 {
-	return fcsim_complete(se_cmd, se_cmd->scsi_status);
+	fcsim_xchg_status(to_cmd(se_cmd), false);
+	return 0;
 }
 
 static void fcsim_queue_tm_rsp(struct se_cmd *se_cmd)
 {
-	struct fcsim_cmd *cmd = container_of(se_cmd, struct fcsim_cmd, se_cmd);
+	struct fcsim_cmd *cmd = to_cmd(se_cmd);
+	unsigned long flags;
+	bool abandoned;
 
-	complete(&cmd->tmr_done);
+	spin_lock_irqsave(&cmd->lock, flags);
+	abandoned = cmd->tmr_state == FCSIM_TMR_ABANDONED;
+	if (!abandoned) {
+		cmd->tmr_state = FCSIM_TMR_RESPONDED;
+		complete(&cmd->tmr_done);
+	}
+	spin_unlock_irqrestore(&cmd->lock, flags);
+
+	/*
+	 * SCSI EH stopped waiting: drop the ACK reference it would have
+	 * dropped.  LIO still holds its own until check_stop_free.
+	 */
+	if (abandoned)
+		target_put_sess_cmd(se_cmd);
 }
 
+/*
+ * Aborted without TAS (e.g. by a LUN reset from the same initiator): LIO
+ * calls this instead of queue_tm_rsp / queue_status and then releases the
+ * command, dropping a TMR's ACK reference itself.
+ */
 static void fcsim_aborted_task(struct se_cmd *se_cmd)
 {
+	struct fcsim_cmd *cmd = to_cmd(se_cmd);
+	unsigned long flags;
+
+	if (se_cmd->se_cmd_flags & SCF_SCSI_TMR_CDB) {
+		spin_lock_irqsave(&cmd->lock, flags);
+		if (cmd->tmr_state != FCSIM_TMR_ABANDONED) {
+			cmd->tmr_state = FCSIM_TMR_ABORTED;
+			complete(&cmd->tmr_done);
+		}
+		spin_unlock_irqrestore(&cmd->lock, flags);
+		return;
+	}
+
+	/* No status will be sent: don't let release_cmd report success. */
+	fcsim_xchg_aborted(cmd);
 }
 
 /* ------------------------------------------------------------- TPG */
@@ -300,8 +330,9 @@ static void fcsim_drop_tpg(struct se_portal_group *se_tpg)
 	tport->tpg_registered = false;
 	mutex_unlock(&fcsim_mutex);
 
-	/* Log out every initiator before the TPG goes away. */
+	/* Log out every initiator and drain the sessions before the TPG goes away. */
 	fcsim_fabric_sync();
+	fcsim_wait_drained(&tport->ndraining);
 
 	mutex_lock(&fcsim_mutex);
 	WARN_ON(!list_empty(&tport->nexus_list));
@@ -388,6 +419,7 @@ static struct se_wwn *fcsim_make_wwn(struct target_fabric_configfs *tf,
 		return ERR_PTR(-ENOMEM);
 
 	INIT_LIST_HEAD(&tport->nexus_list);
+	atomic_set(&tport->ndraining, 0);
 	tport->wwpn = wwpn;
 	tport->wwnn = fcsim_default_wwnn(wwpn);
 	fcsim_format_wwn(tport->name, sizeof(tport->name), wwpn);

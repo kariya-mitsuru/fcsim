@@ -8,6 +8,8 @@
  *       port_name, port_id, scsi_host, targets   (ro)
  *       node_name                          (rw while link is down)
  *       link                               (rw: up / down)
+ *       draining                           (ro) logged-out sessions not yet drained
+ *       faults/<target WWPN | any>/        fault injection rules (fcsim_fault.c)
  */
 #define pr_fmt(fmt) "tcm_fcsim: " fmt
 
@@ -97,12 +99,18 @@ static ssize_t fcsim_host_targets_show(struct config_item *item, char *page)
 	return len;
 }
 
+static ssize_t fcsim_host_draining_show(struct config_item *item, char *page)
+{
+	return sysfs_emit(page, "%d\n", atomic_read(&to_iport(item)->ndraining));
+}
+
 CONFIGFS_ATTR_RO(fcsim_host_, port_name);
 CONFIGFS_ATTR(fcsim_host_, node_name);
 CONFIGFS_ATTR_RO(fcsim_host_, port_id);
 CONFIGFS_ATTR_RO(fcsim_host_, scsi_host);
 CONFIGFS_ATTR(fcsim_host_, link);
 CONFIGFS_ATTR_RO(fcsim_host_, targets);
+CONFIGFS_ATTR_RO(fcsim_host_, draining);
 
 static struct configfs_attribute *fcsim_host_attrs[] = {
 	&fcsim_host_attr_port_name,
@@ -111,6 +119,7 @@ static struct configfs_attribute *fcsim_host_attrs[] = {
 	&fcsim_host_attr_scsi_host,
 	&fcsim_host_attr_link,
 	&fcsim_host_attr_targets,
+	&fcsim_host_attr_draining,
 	NULL,
 };
 
@@ -147,13 +156,20 @@ static struct config_group *fcsim_hosts_make_group(struct config_group *group,
 		return ERR_CAST(iport);
 
 	config_group_init_type_name(&iport->group, name, &fcsim_host_type);
+	config_group_init_type_name(&iport->faults_group, "faults",
+				    &fcsim_faults_type);
+	configfs_add_default_group(&iport->faults_group, &iport->group);
 	return &iport->group;
 }
 
 static void fcsim_hosts_drop_item(struct config_group *group,
 				  struct config_item *item)
 {
-	fcsim_iport_destroy(to_iport(item));
+	struct fcsim_iport *iport = to_iport(item);
+
+	/* configfs refuses the rmdir while fault rules exist. */
+	configfs_remove_default_groups(&iport->group);
+	fcsim_iport_destroy(iport);
 	config_item_put(item);
 }
 

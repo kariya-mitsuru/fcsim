@@ -3,7 +3,9 @@
 #
 #   race-fcsim.sh abort   EH abort of a command that LIO has taken off its
 #                         state list but not yet released (TASK_DOES_NOT_EXIST
-#                         while the se_cmd is still alive)
+#                         while the se_cmd is still alive): EH terminates the
+#                         exchange, the retried command must not be disturbed
+#                         by the late completion.  Same for a LUN reset.
 #   race-fcsim.sh close   LIO close_session (ACL removal) racing with a
 #                         fabric logout (link down)
 #
@@ -84,7 +86,7 @@ abort)
 	# The retried command must not have been completed twice: more I/O.
 	dd if="$DISK" of=/dev/null bs=1M iflag=direct status=none || fail "I/O after abort"
 	splat_check
-	echo "OK: abort waited for the command to be released"
+	echo "OK: abort terminated the exchange, the late completion was dropped"
 
 	step "LUN reset while a READ is held outside the state list"
 	echo 30 > "$DEV/timeout"
@@ -94,7 +96,7 @@ abort)
 	sleep 1
 	start=$(date +%s)
 	sg_reset -d "$DISK" || fail "LUN reset failed"
-	echo "sg_reset -d took $(( $(date +%s) - start ))s (expected ~2s: waits for the release)"
+	echo "sg_reset -d took $(( $(date +%s) - start ))s"
 	wait $DD || fail "READ across LUN reset failed"
 	cmp /tmp/blk /tmp/blk.rd2 || fail "data mismatch across LUN reset"
 	[ "$(cat "$DEV/state")" = running ] || fail "device state $(cat "$DEV/state")"

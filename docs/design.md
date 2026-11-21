@@ -57,10 +57,18 @@ reconcile は「あるべき nexus 集合」と現状を突き合わせ、差分
 2. nexus を iport の RCU リストに追加（I/O パスから検索可能にする）
 3. `fc_remote_port_add(shost, 0, {wwnn, wwpn, port_id, FCP_TARGET})` → transport が自動スキャン（REPORT LUNS は LIO が ACL に従って応答）
 
-ログアウト（逆順）:
-1. `fc_remote_port_delete(rport)` → I/O ブロック、dev_loss_tmo 開始
-2. nexus を RCU リストから外し `synchronize_rcu()`
-3. `target_stop_session` → `target_wait_for_sess_cmds` → `target_remove_session`
+ログアウト:
+1. `fc_remote_port_delete(rport)` → I/O ブロック、dev_loss_tmo / fast_io_fail_tmo 開始
+2. nexus を RCU リストから外し、iport の draining リストへ移す
+3. その組の開いているエクスチェンジを全て終了（LOGO は暗黙に全エクスチェンジを abort する）。
+   sc は `DID_TRANSPORT_DISRUPTED` で返り、ミッドレイヤが再ログイン後に再試行する
+4. **セッションの drain は別 workqueue で非同期に行う**（`fcsim_mutex` の外）:
+   `synchronize_rcu()` → `target_stop_session` → `target_wait_for_sess_cmds` → `target_remove_session`。
+   バックエンドで止まったコマンドがあっても、ファブリックの他の操作は止まらない
+5. 同じ (iport, tport) の組は、古いセッションの drain が終わるまで再ログインしない
+   （古いコマンドが再試行された新しいコマンドを追い越してバックエンドに届くのを防ぐ）。
+   drain 完了で reconcile を起動する
+6. TPG 削除・host 削除は、そのポートの drain 完了を待ってから進む（`fcsim_wait_drained`）
 
 LIO の `close_session`（ACL 削除等）との排他: `target_shutdown_sessions` は `nacl_sess_lock` の下で
 未停止のセッションを ACL のリストから外し、ロックを外してから `close_session` を呼ぶ。
@@ -72,30 +80,74 @@ LIO の `close_session`（ACL 削除等）との排他: `target_shutdown_session
 nexus の検索は `rport->dd_data` を使わず、iport の nexus リストを相手 WWPN で RCU 検索する
 （`fc_remote_port_add` は rport 再利用時に `dd_data` をゼロクリアし、かつ戻る前に ONLINE にするため）。
 
-## 4. I/O パス
+ファブリックへの参加・離脱（tport の online 状態の変化）は、link up 中の全 iport に
+`FCH_EVT_RSCN`（data = tport の port_id）として netlink で通知する。link up/down は `FCH_EVT_LINKUP/LINKDOWN`。
+
+## 4. I/O パス（エクスチェンジ）
+
+コマンドごとにエクスチェンジ `struct fcsim_cmd` を sc とは別に確保する（kmem_cache、`SLAB_TYPESAFE_BY_RCU`）。
+実機の HBA が自前の I/O コンテキストを持つのと同じく、initiator 側はいつでもエクスチェンジを
+**終了**（sc を切り離してミッドレイヤへ返す）でき、LIO がまだ処理中でも構わない。
+切り離し後に LIO が返す結果・データは捨てる。データは LIO 自身のバッファとの間でコピーする
+（SGL の pass-through はしない。切り離した後で LIO が initiator のページに触れないようにするため）。
 
 ```
 queuecommand(sc)
-  fc_remote_port_chkready(rport)            … blocked なら DID_IMM_RETRY 等
-  rcu_read_lock → nexus 検索 → target_init_cmd(se_sess) → rcu_read_unlock
-  target_submit_prep(cdb, scsi_sglist(sc)) … initiator の SGL をそのまま渡す（コピー無し）
-  target_submit()                           … TARGET_QUEUE_SUBMIT（LIO の workqueue で実行）
-LIO 完了
-  write_pending  → target_execute_cmd（データは既に SGL にある）
-  queue_data_in / queue_status → result・sense・residual を設定
-  check_stop_free → transport_generic_free_cmd
-  release_cmd    → scsi_done(sc)
+  fc_remote_port_chkready(rport)              … blocked なら DID_IMM_RETRY 等
+  障害注入ルールの評価                         … error: 即応答 / drop=cmd・delay: ファブリックで保持
+  エクスチェンジ確保（cdb・LUN・長さ・方向をコピー）、scsi_cmd_priv(sc)->cmd に公開
+  deliver: nexus 検索 → target_init_cmd → target_submit_prep(cdb, SGL 無し) → target_submit
+LIO
+  write_pending  → sc が繋がっていれば sc の SGL → LIO のバッファへコピーして target_execute_cmd。
+                   切り離し済みなら TCM_CHECK_CONDITION_ABORT_CMD で失敗させる（qla2xxx と同じ）
+  queue_data_in  → 繋がっていれば LIO のバッファ → sc へコピー、result・sense・residual を設定
+  queue_status   → 同上（データ無し）
+  release_cmd    → 繋がっていれば scsi_done（drop=rsp なら応答を捨ててファブリックで保持）
 ```
 
-- `se_cmd` とセンスバッファは `scsi_cmd_priv(sc)`（`cmd_size`）に置き、追加割り当て無し
-- エラー処理: `eh_timed_out = fc_eh_timed_out`、`eh_abort_handler` → `TMR_ABORT_TASK`、
-  `eh_device_reset_handler` → `TMR_LUN_RESET`（いずれも先に `fc_block_scsi_eh`）
-- EH が SUCCESS / FAST_IO_FAIL を返すとミッドレイヤはその sc を即座に再発行しうる（`fcsim_cmd` を再利用）。
-  LIO は state list から外した後に `release_cmd` を呼ぶため、TMR の応答（特に `TASK_DOES_NOT_EXIST`）
-  だけではコマンドが解放済みとは限らない。そこで:
-  - 完了は `fcsim_cmd_done()` に集約し、RCU read 区間内で `released` を立ててから `scsi_done`
-  - EH は対象コマンド（LUN RESET なら当該 LUN の全コマンド）の `released` を待ち（上限 30 秒）、
-    `synchronize_rcu()` で `scsi_done` の実行中を待ってから SUCCESS を返す。待ち切れなければ FAILED
+- 参照: SCSI 側（切り離しで落とす）と LIO 側（`release_cmd` で落とす）の 2 本。sc とのリンクは `cmd->lock` の下で扱う
+- `scsi_done` は RCU read 区間内で呼ぶ。EH はエクスチェンジが既に切り離されていた場合、
+  `synchronize_rcu()` で実行中の `scsi_done` を待ってから sc をミッドレイヤへ返す（再発行との競合防止）
+- 遅延中のコマンドは iport の held リストとタイマーで保持し、終了時はタイマーを同期削除する
+
+### エラー処理（SCSI EH）
+
+| ハンドラ | 動作 |
+|---|---|
+| `eh_timed_out` | `fc_eh_timed_out`（rport が blocked ならタイマー延長） |
+| abort | ファブリックが保持中ならそのまま終了。LIO に渡っていれば `TMR_ABORT_TASK` を送り、COMPLETE / TASK_DOES_NOT_EXIST なら終了して SUCCESS、応答なしなら FAILED（エスカレート） |
+| device reset | `TMR_LUN_RESET` が COMPLETE なら当該 LUN のエクスチェンジを全て終了 |
+| target reset | LIO は TARGET RESET TMF を拒否するため、target 配下の全 LUN に LUN RESET を送り、target のエクスチェンジを全て終了 |
+| host reset | HBA リセット: そのポートの全エクスチェンジを終了して常に SUCCESS。ログインは維持（直後に EH が送る TUR を通すため） |
+
+- いずれも先に `fc_block_scsi_eh`。FAST_IO_FAIL なら対象を `DID_TRANSPORT_FAILFAST` で終了して返す
+- TMR の応答待ちは `tmr_timeout` 秒（既定 10）で打ち切る。LIO の TMR は TAS 無しで abort されると
+  `queue_tm_rsp` の代わりに `aborted_task` が呼ばれ ACK 参照を LIO 自身が落とすため、
+  応答あり / abort された / EH が諦めた、の 3 状態で ACK 参照の受け渡しを管理する
+- `terminate_rport_io`: fast_io_fail_tmo / dev_loss_tmo 満了時、その rport の全エクスチェンジを
+  `DID_TRANSPORT_FAILFAST` で終了する。これで rport 属性 `fast_io_fail_tmo` が機能する（multipath の高速フェイルオーバ）
+- バックエンドが止まった場合: EH は TMR 無応答 → … → host reset でエクスチェンジを終了して成功し、
+  再試行を使い切った I/O はエラーになる。デバイスは offline にならない。LIO 側の止まったコマンドは
+  バックエンドが戻るまで残り、そのセッションの drain も待ち続ける
+
+### 障害注入（ファブリック）
+
+ファブリック（initiator と LIO の間）で、コマンド単位に障害を起こす。ルールは (iport, 相手 tport) ごと、
+または iport の全 tport（`any`）に対して置き、特定 tport のルールが優先する。
+
+```
+/sys/kernel/config/fcsim/hosts/<initiator WWPN>/faults/<target WWPN | any>/
+  delay_ms      コマンドを target へ届けるまでの遅延
+  drop          none | cmd（target に届かない）| rsp（target は実行するが応答が失われる）。
+                TMR も応答なしになる（EH のエスカレーションを試せる）
+  error         none | transport (DID_ERROR) | busy | qfull | medium (03/11/00) | aborted (0B/00/00):
+                target に届けず即座にこのエラーを返す
+  probability   対象コマンドのうち影響させる割合 %（既定 100）
+  count         あと何コマンドに影響させるか（-1 = 無制限、既定）
+  injected      (ro) 影響させたコマンド数
+```
+
+カーネルは仕組みだけを持ち、シナリオ（いつ・どのパスを壊すか）はユーザ空間が組む。
 
 ## 5. 設定インターフェース
 
@@ -126,9 +178,20 @@ targetcli 上では単一 TPG の fabric（qla2xxx と同じ）として `tpg1` 
       port_name, port_id, scsi_host, targets   (ro)
       node_name                 (rw, link down 中のみ変更可)
       link                      (rw: up / down)
+      draining                  (ro) ログアウト済みで drain 中のセッション数
+      faults/<target WWPN|any>/ 障害注入ルール（上記）
 ```
 
-`/sys/class/fc_host/hostN/issue_lip` に書くと、未ログインの組み合わせを再試行し、既存 rport を再スキャンする。
+`/sys/class/fc_host/hostN/issue_lip` に書くと、未ログインの組み合わせを再試行し、online の rport を再スキャンする
+（`fc_user_scan` と同じく host_lock の下で online のものだけ）。
+
+モジュールパラメータ（`/sys/module/tcm_fcsim/parameters/`）:
+
+| 名前 | 既定 | 意味 |
+|---|---|---|
+| `tmr_timeout` | 10 | EH が TMR の応答を待つ秒数 |
+| `dbg_release_delay_ms` | 0 | テスト専用: 次の READ の解放を遅らせる（1 回限り） |
+| `dbg_close_delay_ms` | 0 | テスト専用: `close_session` の先頭で眠る |
 
 ### targetcli 連携
 
@@ -144,12 +207,18 @@ rmmod 前に `rmdir` が必要（他の fabric と同じ）。
 src/
   fcsim.h         共通定義
   fcsim_main.c    モジュール init/exit、ファブリック（port_id、reconcile、login/logout）、WWN ユーティリティ
-  fcsim_ini.c     Scsi_Host / fc_function_template、queuecommand、EH、rport add/delete
+  fcsim_ini.c     Scsi_Host / fc_function_template、エクスチェンジ、queuecommand、EH、rport add/delete
   fcsim_tgt.c     target_core_fabric_ops、LIO configfs（wwn/tpg/attrib/acl）
   fcsim_cfs.c     独自 configfs（/sys/kernel/config/fcsim）
+  fcsim_fault.c   障害注入ルール（hosts/<wwpn>/faults）
 tools/fcsim-targetcli
-tests/            virtme-ng ゲスト内で実行するテスト（race-fcsim.sh はテスト専用モジュールパラメータ
-                  dbg_release_delay_ms / dbg_close_delay_ms で競合の窓を広げる回帰テスト）
+scripts/run-guest-test.sh   ゲストでテストを 1 本実行し、出力と dmesg を .test-out/ に残す
+tests/            virtme-ng ゲスト内で実行するテスト（make test で全部）
+  smoke-fcsim.sh, smoke-fcsim-targetcli.sh   基本動作、targetcli 連携
+  race-fcsim.sh {abort,close}                競合の回帰テスト（dbg_* パラメータで窓を広げる）
+  fault-fcsim.sh                             障害注入、fast_io_fail_tmo、RSCN / link イベント（fc-events.py）
+  hang-fcsim.sh                              バックエンド停止（dmsetup suspend）時の EH とファブリックの応答性
+  multipath-fcsim.sh                         2 iport × 2 tport の dm-multipath フェイルオーバとデータ整合性
 ```
 
 ## 7. 段階
@@ -157,16 +226,19 @@ tests/            virtme-ng ゲスト内で実行するテスト（race-fcsim.sh
 | 段階 | 内容 |
 |---|---|
 | 1 (MVP) | 単一ファブリック・全対全、iport/tport、ログイン、rport・スキャン、READ/WRITE、link up/down、ABORT/LUN RESET、KASAN/lockdep 有効で作成〜削除〜rmmod がクリーン |
-| 2 | `terminate_rport_io`・dev_loss_tmo の厳密化、障害注入（遅延・無応答・エラー応答）、RSCN、multipath テスト（2 iport × 2 tport） |
+| 2（済） | エクスチェンジ化、非同期 drain、TMR タイムアウト、target/host reset、`terminate_rport_io`（fast_io_fail_tmo）、障害注入（遅延・無応答・エラー応答）、RSCN、multipath テスト（2 iport × 2 tport） |
 | 3 | ゾーニング、NPIV（`vport_create`）、fc_host 統計、rtslib upstream、initiator 側 CLI |
 
-## 8. 既知の制限（段階 1）
+## 8. 既知の制限
 
-- バックエンドが応答しなくなると、`fcsim_mutex` を持ったままのセッション drain と上限の無い TMR 待ちで
-  ファブリック操作全体が止まる（段階 2 でタイムアウト化）
-- `eh_target_reset_handler` / `eh_host_reset_handler` は未実装（段階 2）
+- バックエンドで止まったコマンドは LIO から取り戻せない。initiator 側は EH で終了できるが、
+  そのセッションの drain・TPG 削除・host 削除・その組の再ログインはバックエンドが戻るまで待つ
+- reconcile は単一の ordered workqueue で、`fc_remote_port_add` はホストの scan work を flush する。
+  EH 中のホストで scan が保留されているとき、そのホストへのログインが EH 終了まで待たされ、その間 reconcile 全体が止まる可能性がある
+- データは LIO のバッファとの間でコピーする（pass-through しない）分、tcm_loop より CPU を使う
 - T10-PI（DIF/DIX）は非対応
 - LUN マップ変更時の自動再スキャンはしない（実機同様、LIO が REPORTED LUNS DATA HAS CHANGED の UA を返すのみ）。
   `issue_lip` で再スキャンできる
 - 見える LUN が 1 つも無い間は SCSI 層が scsi_target を回収するため `fc_transport/target*` は現れない
   （rport は存在する。実機で LUN マスキングされていないアレイと同じ挙動）
+- `sessions` / `targets` 属性は 1 ページ（約 170 ポート）を超えると切り詰められる
