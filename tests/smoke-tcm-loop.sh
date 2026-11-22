@@ -3,7 +3,8 @@
 # create a LIO ramdisk LUN exported through tcm_loop and check it appears as a SCSI disk.
 set -euxo pipefail
 
-. "$(dirname "$0")/guest-setup.sh"
+TOP=$(cd "$(dirname "$0")/.." && pwd)
+. "$TOP/tests/guest-setup.sh"
 
 WWN=naa.5001405000000001
 

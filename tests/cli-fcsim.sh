@@ -103,6 +103,13 @@ if $CTL fault set $I1 $T1 bogus=1 2>/tmp/err; then fail "bogus attribute accepte
 cat /tmp/err
 if $CTL host create 12:34 2>/tmp/err; then fail "bad WWPN accepted"; fi
 cat /tmp/err
+# A zone name is a path component: it must not reach outside zones/
+# (I2 has no fault rules, so rmdir of its port would succeed).
+for a in delete add; do
+	if $CTL zone $a ../hosts/$I2 $T1 2>/tmp/err; then fail "zone $a accepted ../hosts"; fi
+	cat /tmp/err
+done
+[ -d $HOSTS/$I2 ] || fail "zone delete ../hosts removed an initiator port"
 
 step "fault set is all or nothing"
 R=$HOSTS/$I1/faults/$T1

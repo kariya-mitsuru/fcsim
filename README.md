@@ -74,15 +74,23 @@ sudo tools/fcsimctl zone commit
 sudo tools/fcsimctl fpin li 21:00:00:00:00:00:00:01 link_failure
 
 # 保存・復元（target 側は fcsim-targetctl、initiator 側とゾーニングは fcsimctl）
+# 注意: fcsim-targetctl は LIO 全体が対象（下記）
 sudo tools/fcsim-targetctl save /etc/target/fcsim-target.json
 sudo tools/fcsimctl save /etc/target/fcsim-initiator.json
 
-# 片付け
+# 片付け（作ったものだけを消す）
 sudo tools/fcsimctl clear
-sudo tools/fcsim-targetctl clear
+sudo tools/fcsim-targetcli /fcsim delete naa.2100000000000001
+sudo tools/fcsim-targetcli /backstores/ramdisk delete rd0
 sudo rmdir /sys/kernel/config/target/fcsim
 sudo rmmod tcm_fcsim
 ```
+
+**注意**: `fcsim-targetctl` は fcsim fabric を登録してから `targetctl` を実行するだけで、fabric を区別しない。
+`save` は iSCSI など他の fabric も含めた LIO 全体を書き出し、`restore` と `clear` は LIO 全体を消してから
+（`restore` は復元を）行う。他の LIO の設定があるホストでは、`restore`・`clear` を使わず、
+上の片付けの例のように `fcsim-targetcli` で fcsim の target と backstore を個別に消すこと。
+`fcsimctl` は fcsim の範囲（initiator ポートとゾーニング）しか触らない。
 
 **注意**: カーネルモジュールなので、不具合はホストのカーネルごと巻き込む。WSL2 では全 distro が同じカーネルを
 共有しているため、他の distro も止まる。まず virtme-ng のテスト（`make test-wsl` 等）で確認してから使うこと。

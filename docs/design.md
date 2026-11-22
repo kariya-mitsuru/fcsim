@@ -257,7 +257,7 @@ fcsimctl zone list | create <name> [wwpn...] | delete <name> | add|remove <name>
 fcsimctl zone mode on|off | commit | revert
 fcsimctl fpin li|pn|dn|cn <wwpn> [event] [key=value...]
 fcsimctl save|restore <file.json>           ゾーニング（編集中の構成）・host・link・障害ルール
-                                            （target 側は fcsim-targetctl で別に。restore は入力を検証してから現在の構成を消し、ゾーニングを先に commit してから host を作る）
+                                            （target 側は fcsim-targetctl で別に。ただし LIO 全体が対象。restore は入力を検証してから現在の構成を消し、ゾーニングを先に commit してから host を作る）
 fcsimctl clear
 ```
 
@@ -279,6 +279,10 @@ WWPN は `10:00:...`、`naa.1000...`、`0x1000...`、`1000...` のいずれで�
 AlmaLinux 9 の rtslib は fabric 一覧が Python コードに固定（qla2xxx すら無効化されている）。
 当面は `fcsim` 用の FabricModule を登録してから targetcli を起動するラッパー（`tools/fcsim-targetcli`、
 `tools/fcsim-targetctl` は save/restore/clear 用）を用意し、将来 rtslib-fb upstream にパッチを送る。
+ラッパーは fabric を登録するだけなので、targetctl の各操作は fcsim に限らず **LIO 全体** が対象になる
+（`save` は全 fabric を書き出し、`clear` は `RTSRoot().clear_existing()` で全体を消し、`restore` も既存の設定を消してから復元する）。
+他の LIO 設定があるホストで fcsim だけを片付けるには、`fcsim-targetcli /fcsim delete naa.…` と
+`/backstores/... delete` で個別に消す（`scripts/wsl-try.sh` と同じ）。
 `targetctl clear` は fabric ディレクトリ（`/sys/kernel/config/target/fcsim`）を残すため、
 rmmod 前に `rmdir` が必要（他の fabric と同じ）。
 

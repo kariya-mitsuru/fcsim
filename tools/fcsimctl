@@ -448,7 +448,8 @@ def zoning_state():
 
 
 def zone_dir(name, must_exist=True):
-    d = os.path.join(ZONES, name)
+    # The name becomes a path: check it before it can escape ZONES.
+    d = os.path.join(ZONES, zone_name_check(name))
     if must_exist and not os.path.isdir(d):
         raise Error("no such zone: %s" % name)
     return d
