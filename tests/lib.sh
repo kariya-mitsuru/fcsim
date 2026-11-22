@@ -67,6 +67,119 @@ make_tport() {	# make_tport <twwpn> <backstore> <iwwpn>...
 
 host_of() { cat "$HOSTS/$1/scsi_host"; }	# host_of <iwwpn> -> hostN
 
+# fcsim_disk: /dev/sdX of the first fcsim LUN that can be opened.
+fcsim_disk() {
+	local d
+	for d in /sys/class/fc_transport/target*/device/*/block/*; do
+		[ -e "$d" ] && blockdev --getsz "/dev/$(basename "$d")" >/dev/null 2>&1 &&
+			{ echo "/dev/$(basename "$d")"; return 0; }
+	done
+	return 1
+}
+
+# wait_paths <n> [seconds]: wait until there are <n> sd devices behind FC
+# targets (paths to fcsim LUNs).
+npaths() { ls -d /sys/class/fc_transport/target*/device/*/block/* 2>/dev/null | wc -l; }
+wait_paths() {
+	local n=$1 t=$(( ${2:-10} * 10 ))
+	while [ "$(npaths)" != "$n" ]; do
+		t=$((t - 1)); [ $t -gt 0 ] || return 1
+		sleep 0.1
+	done
+}
+
+rport_of() {	# rport_of <hostN> <target wwpn> -> rport-X:Y-Z
+	local rp
+	for rp in /sys/class/scsi_host/$1/device/rport-*; do
+		[ "$(cat /sys/class/fc_remote_ports/$(basename $rp)/port_name)" = "0x${2//:/}" ] &&
+			{ basename $rp; return 0; }
+	done
+	return 1
+}
+
+rport_of_disk() {	# rport_of_disk <sdX> -> rport-X:Y-Z
+	ls -d /sys/class/scsi_host/*/device/rport-*/target*/*/block/"$1" |
+		sed 's|.*/\(rport-[^/]*\)/.*|\1|'
+}
+
+# ---------------------------------------------------------------- multipath
+
+# write_multipath_conf <extra defaults> <device settings>: multipath only
+# the LIO devices, with the given settings; no stale bindings.
+write_multipath_conf() {
+	mkdir -p /etc/multipath
+	rm -f /etc/multipath/bindings /etc/multipath/wwids
+	cat > /etc/multipath.conf <<-END
+	defaults {
+		polling_interval	1
+		user_friendly_names	yes
+		find_multipaths		off
+	$1
+	}
+	blacklist {
+		device {
+			vendor	".*"
+			product	".*"
+		}
+	}
+	blacklist_exceptions {
+		device {
+			vendor	"LIO-ORG"
+		}
+	}
+	devices {
+		device {
+			vendor			"LIO-ORG"
+			product			".*"
+	$2
+		}
+	}
+	END
+}
+
+# start_multipathd <verbosity> <active paths>: multipathd in the foreground
+# (log /tmp/multipathd.log), stopped by stop_multipathd or on exit.  Waits
+# for its map (MAP) to have <active paths>.
+MPD_PID=
+stop_multipathd() {
+	[ -n "$MPD_PID" ] || return 0
+	multipathd shutdown >/dev/null 2>&1 || true
+	wait "$MPD_PID" 2>/dev/null || true
+	MPD_PID=
+}
+start_multipathd() {
+	trap stop_multipathd EXIT
+	multipathd -d -s -v"$1" > /tmp/multipathd.log 2>&1 &
+	MPD_PID=$!
+	wait_for 20 sh -c "multipathd show maps raw format '%n' 2>/dev/null | grep -q ." \
+		|| { tail -30 /tmp/multipathd.log; fail "multipathd built no map"; }
+	MAP=$(multipathd show maps raw format '%n' | head -1)
+	wait_mp_active "$2" 20 || fail "not all paths active"
+}
+wait_mp_active() {	# wait_mp_active <n> <seconds>
+	wait_for "$2" sh -c "[ \$(multipathd show paths raw format '%t' | grep -c '^active') = $1 ]"
+}
+
+# writer_start <device> <size MiB>: rewrite /tmp/pat onto <device> chunk by
+# chunk in the background until writer_stop, which fails the test if any
+# write failed.
+writer_start() {
+	rm -f /tmp/stop /tmp/writer.err
+	(
+		i=0
+		while [ ! -e /tmp/stop ]; do
+			dd if=/tmp/pat of="$1" bs=1M count=1 skip=$i seek=$i \
+				oflag=direct status=none || { echo "write $i failed" > /tmp/writer.err; exit 1; }
+			i=$(( (i + 1) % $2 ))
+		done
+	) &
+	WRITER=$!
+}
+writer_stop() {
+	touch /tmp/stop
+	wait "$WRITER" || fail "writer: $(cat /tmp/writer.err 2>/dev/null)"
+}
+
 # disk_of <hostN> <model>: sdX of the LUN whose INQUIRY product is <model>
 # (LIO reports the backstore name).
 disk_of() {

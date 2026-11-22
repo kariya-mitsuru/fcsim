@@ -17,24 +17,7 @@ T2=21:00:00:00:00:00:00:02
 I1=10:00:00:00:c9:00:00:01
 I2=10:00:00:00:c9:00:00:02
 SIZE_MB=32
-MPD_PID=
 
-cleanup() {
-	[ -n "$MPD_PID" ] || return 0
-	multipathd shutdown >/dev/null 2>&1 || true
-	wait "$MPD_PID" 2>/dev/null || true
-	MPD_PID=
-}
-trap cleanup EXIT
-
-rport_of() {	# rport_of <hostN> <target wwpn> -> rport-X:Y-Z
-	local rp
-	for rp in /sys/class/scsi_host/$1/device/rport-*; do
-		[ "$(cat /sys/class/fc_remote_ports/$(basename $rp)/port_name)" = "0x${2//:/}" ] &&
-			{ basename $rp; return 0; }
-	done
-	return 1
-}
 rstat() { hexval /sys/class/fc_remote_ports/$(rport_of $1 $2)/statistics/$3; }	# rstat <host> <target> <stat>
 hstat() { hexval /sys/class/fc_host/$1/statistics/$2; }
 
@@ -48,8 +31,7 @@ make_tport $T2 /backstores/ramdisk/shared $I1 $I2
 $CTL host create $I1
 $CTL host create $I2
 H1=$(host_of $I1); H2=$(host_of $I2)
-wait_for 10 sh -c "[ \$(ls -d /sys/class/fc_transport/target*/device/*/block/* 2>/dev/null | wc -l) = 4 ]" \
-	|| fail "expected 4 paths"
+wait_paths 4 || fail "expected 4 paths"
 udevadm settle
 
 # ---------------------------------------------------------------------------
@@ -77,8 +59,7 @@ dmesg | grep "FPIN li about $T1" | tail -1 | sed 's/^/  /'
 dmesg | grep "FPIN li about $T1" | tail -1 | grep -q "sent to 1 port" || fail "LI about T1 reached I2 outside the zone"
 $CTL zone mode off
 $CTL zone commit
-wait_for 10 sh -c "[ \$(ls -d /sys/class/fc_transport/target*/device/*/block/* 2>/dev/null | wc -l) = 4 ]" \
-	|| fail "paths not back after zoning off"
+wait_paths 4 || fail "paths not back after zoning off"
 
 step "1. other FPINs"
 $CTL fpin cn $I1 credit_stall severity=error
@@ -102,49 +83,17 @@ splat_check
 
 # ---------------------------------------------------------------------------
 step "2. multipathd with marginal_pathgroups fpin"
-mkdir -p /etc/multipath
-rm -f /etc/multipath/bindings /etc/multipath/wwids
-cat > /etc/multipath.conf <<'EOF'
-defaults {
-	polling_interval	1
-	user_friendly_names	yes
-	find_multipaths		off
-	marginal_pathgroups	fpin
-}
-blacklist {
-	device {
-		vendor	".*"
-		product	".*"
-	}
-}
-blacklist_exceptions {
-	device {
-		vendor	"LIO-ORG"
-	}
-}
-devices {
-	device {
-		vendor			"LIO-ORG"
-		product			".*"
-		path_grouping_policy	multibus
-		hardware_handler	"0"
-		prio			const
-		path_selector		"round-robin 0"
-		path_checker		tur
-		failback		immediate
-		no_path_retry		8
-	}
-}
-EOF
-multipathd -d -s -v3 > /tmp/multipathd.log 2>&1 &
+write_multipath_conf "	marginal_pathgroups	fpin" '
+	path_grouping_policy	multibus
+	hardware_handler	"0"
+	prio			const
+	path_selector		"round-robin 0"
+	path_checker		tur
+	failback		immediate
+	no_path_retry		8'
+start_multipathd 3 4
 # keep multipathd's log next to the test output for debugging
-trap 'cp /tmp/multipathd.log "$TOP/.test-out/fpin-multipathd.log" 2>/dev/null; cleanup' EXIT
-MPD_PID=$!
-wait_for 20 sh -c "multipathd show maps raw format '%n' 2>/dev/null | grep -q ." \
-	|| { tail -30 /tmp/multipathd.log; fail "multipathd built no map"; }
-MAP=$(multipathd show maps raw format '%n' | head -1)
-wait_for 20 sh -c "[ \$(multipathd show paths raw format '%t' | grep -c '^active') = 4 ]" \
-	|| fail "not all paths active"
+trap 'cp /tmp/multipathd.log "$TOP/.test-out/fpin-multipathd.log" 2>/dev/null; stop_multipathd' EXIT
 multipath -ll "$MAP" | sed 's/^/  /'
 
 # the sd devices behind T1 / T2
@@ -188,7 +137,7 @@ for h in $H1 $H2; do
 	wait_for 20 sh -c "[ \$(cat /sys/class/fc_remote_ports/$(rport_of $h $T1)/port_state) = Online ]" \
 		|| fail "$h: T1 rport still $(cat /sys/class/fc_remote_ports/$(rport_of $h $T1)/port_state)"
 done
-wait_for 30 sh -c "[ \$(multipath -ll $MAP | grep -c 'policy=') = 1 ] && [ \$(multipathd show paths raw format '%t' | grep -c '^active') = 4 ]" \
+wait_for 30 sh -c "[ \$(multipath -ll $MAP | grep -c 'policy=') = 1 ]" && wait_mp_active 4 30 \
 	|| { multipath -ll "$MAP"; fail "paths not back in one group"; }
 multipath -ll "$MAP" | sed 's/^/  /'
 t1_before=$(ios $T1DEVS)
@@ -200,7 +149,7 @@ splat_check
 step "teardown"
 udevadm settle
 wait_for 10 multipath -F || fail "multipath -F: map stays in use"
-cleanup
+stop_multipathd
 $CTL clear
 teardown_all
 splat_check

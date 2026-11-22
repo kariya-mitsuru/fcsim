@@ -18,44 +18,14 @@
 set -euo pipefail
 
 TOP=$(cd "$(dirname "$0")/.." && pwd)
-. "$TOP/tests/guest-setup.sh"
+. "$TOP/tests/lib.sh"
 
 SCENARIO=${1:?usage: $0 abort|close|deliver}
 TWWPN=21:00:00:00:00:00:00:01
 IWWPN=10:00:00:00:c9:00:00:01
-LIO=/sys/kernel/config/target
 TPG=$LIO/fcsim/$TWWPN/tpgt_1
-HOSTS=/sys/kernel/config/fcsim/hosts
-PARAM=/sys/module/tcm_fcsim/parameters
-
-step() { echo; echo "=== $*"; }
-fail() { echo "FAIL: $*" >&2; dmesg | tail -60 >&2; exit 1; }
-
-wait_for() {	# wait_for <seconds> <command...>
-	local t=$(( $1 * 10 )); shift
-	while ! "$@" >/dev/null 2>&1; do
-		t=$((t - 1)); [ $t -gt 0 ] || return 1
-		sleep 0.1
-	done
-}
-
-fcsim_disk() {
-	local d
-	for d in /sys/class/fc_transport/target*/device/*/block/*; do
-		[ -e "$d" ] && blockdev --getsz "/dev/$(basename "$d")" >/dev/null 2>&1 &&
-			{ echo "/dev/$(basename "$d")"; return 0; }
-	done
-	return 1
-}
-
-splat_check() {
-	if dmesg | grep -E 'BUG:|WARNING:|KASAN|possible circular|INFO: task .* blocked|Call Trace'; then
-		fail "kernel splat detected"
-	fi
-}
 
 step "setup: ramdisk LUN 0 on $TWWPN, explicit ACL for $IWWPN"
-modprobe target_core_mod
 load_fcsim
 targetcli /backstores/ramdisk create rd0 16M >/dev/null
 RD=$(dirname "$(ls -d $LIO/core/rd_mcp_*/rd0)")/rd0

@@ -14,7 +14,6 @@ I2=10:00:00:00:c9:00:00:02
 
 
 step "setup: targets via fcsim-targetcli"
-modprobe target_core_mod
 load_fcsim
 $TCLI /backstores/ramdisk create rd0 64M >/dev/null
 $TCLI /backstores/ramdisk create rd1 16M >/dev/null
@@ -119,8 +118,6 @@ echo "  restored config matches"
 step "errors"
 if $CTL link 10:00:00:00:c9:00:00:77 up 2>/tmp/err; then fail "unknown host accepted"; fi
 cat /tmp/err
-if $CTL fault set $I1 $T1 bogus=1 2>/tmp/err; then fail "bogus attribute accepted"; fi
-cat /tmp/err
 if $CTL host create 12:34 2>/tmp/err; then fail "bad WWPN accepted"; fi
 cat /tmp/err
 # A zone name is a path component: it must not reach outside zones/
@@ -138,6 +135,7 @@ if $CTL fault set $I1 $T1 drop=cmd probability=abc 2>/tmp/err; then fail "bad pr
 cat /tmp/err
 [ ! -e $R ] || fail "failed fault set left a rule"
 if $CTL fault set $I1 $T1 bogus=1 2>/tmp/err; then fail "bogus attribute accepted"; fi
+cat /tmp/err
 [ ! -e $R ] || fail "unknown attribute left an empty rule"
 # Updating a rule keeps the attributes not given, count included.
 $CTL fault set $I1 $T1 drop=cmd count=0

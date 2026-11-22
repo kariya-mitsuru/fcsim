@@ -10,36 +10,13 @@
 set -euo pipefail
 
 TOP=$(cd "$(dirname "$0")/.." && pwd)
-. "$TOP/tests/guest-setup.sh"
+. "$TOP/tests/lib.sh"
 
 TWWPN=21:00:00:00:00:00:00:01
 IWWPN=10:00:00:00:c9:00:00:01
-LIO=/sys/kernel/config/target
 TPG=$LIO/fcsim/$TWWPN/tpgt_1
-HOSTS=/sys/kernel/config/fcsim/hosts
-
-step() { echo; echo "=== $*"; }
-fail() { echo "FAIL: $*" >&2; dmesg | tail -40 >&2; exit 1; }
-
-wait_for() {	# wait_for <seconds> <command...>
-	local t=$(( $1 * 10 )); shift
-	while ! "$@" >/dev/null 2>&1; do
-		t=$((t - 1)); [ $t -gt 0 ] || return 1
-		sleep 0.1
-	done
-}
-
-fcsim_disk() {	# print /dev/sdX of the fcsim LUN 0, if any
-	local d
-	for d in /sys/class/fc_transport/target*/device/*/block/*; do
-		[ -e "$d" ] && blockdev --getsz "/dev/$(basename "$d")" >/dev/null 2>&1 &&
-			{ echo "/dev/$(basename "$d")"; return 0; }
-	done
-	return 1
-}
 
 step "load modules"
-modprobe target_core_mod	# includes the ramdisk (rd_mcp) backstore
 load_fcsim
 cat /sys/kernel/config/fcsim/version
 
@@ -136,8 +113,6 @@ echo "OK: module unloaded"
 
 step "dmesg check"
 dmesg | grep tcm_fcsim | tail -20
-if dmesg | grep -E 'BUG:|WARNING:|KASAN|possible circular|INFO: task .* blocked|Call Trace' ; then
-	fail "kernel splat detected"
-fi
+splat_check
 echo
 echo "PASS"

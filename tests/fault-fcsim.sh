@@ -12,7 +12,6 @@ I1=10:00:00:00:c9:00:00:01
 F=$HOSTS/$I1/faults/$T1
 
 step "setup: T1 (rd0) and T2 (rd1), host I1"
-modprobe target_core_mod
 load_fcsim tmr_timeout=1
 $TCLI /backstores/ramdisk create rd0 16M >/dev/null
 $TCLI /backstores/ramdisk create rd1 16M >/dev/null
@@ -113,7 +112,7 @@ echo "  ok: recovered after removing the rule"
 splat_check
 
 step "fast_io_fail_tmo: I/O fails over quickly while the rport is blocked"
-RPORT=$(ls -d /sys/class/scsi_host/$H1/device/rport-*/target*/*/block/$D | sed 's|.*/\(rport-[^/]*\)/.*|\1|')
+RPORT=$(rport_of_disk $D)
 RP=/sys/class/fc_remote_ports/$RPORT
 echo 30 > $RP/dev_loss_tmo
 echo 2 > $RP/fast_io_fail_tmo

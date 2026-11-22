@@ -20,7 +20,6 @@ MP=mpfc
 SIZE_MB=32
 
 step "setup: one ramdisk behind T1 and T2, initiators I1 and I2"
-modprobe target_core_mod
 modprobe dm_multipath
 modprobe dm_round_robin
 load_fcsim tmr_timeout=1
@@ -35,14 +34,13 @@ paths() {	# all sd devices of the shared LUN, one per line
 	ls -d /sys/class/scsi_host/{$H1,$H2}/device/rport-*/target*/*/block/* 2>/dev/null |
 		xargs -n1 basename | sort
 }
-wait_for 10 sh -c "[ \$(ls -d /sys/class/scsi_host/{$H1,$H2}/device/rport-*/target*/*/block/* 2>/dev/null | wc -l) = 4 ]" \
-	|| fail "expected 4 paths"
+wait_paths 4 || fail "expected 4 paths"
 udevadm settle
 
 # path name -> "I<n>->T<n> sdX maj:min"
 declare -A PATH_OF
 for d in $(paths); do
-	rp=$(ls -d /sys/class/scsi_host/*/device/rport-*/target*/*/block/$d | sed 's|.*/\(rport-[^/]*\)/.*|\1|')
+	rp=$(rport_of_disk $d)
 	host=$(ls -d /sys/class/scsi_host/*/device/$rp | sed 's|/sys/class/scsi_host/\([^/]*\)/.*|\1|')
 	tp=$(cat /sys/class/fc_remote_ports/$rp/port_name)
 	i=$([ "$host" = "$H1" ] && echo I1 || echo I2)
@@ -82,28 +80,17 @@ head -c $((SIZE_MB << 20)) /dev/urandom > /tmp/pat
 dd if=/tmp/pat of=/dev/mapper/$MP bs=1M oflag=direct status=none
 echo "  initial states: $(mp_states)"
 
-# Rewrites the pattern chunk by chunk through the multipath device until
-# /tmp/stop appears; any failed write is fatal.
-writer() {
-	local i=0
-	while [ ! -e /tmp/stop ]; do
-		dd if=/tmp/pat of=/dev/mapper/$MP bs=1M count=1 skip=$i seek=$i \
-			oflag=direct status=none || { echo "write $i failed" > /tmp/writer.err; return 1; }
-		i=$(( (i + 1) % SIZE_MB ))
-	done
-}
-
+# While a writer rewrites the pattern through the multipath device (any
+# failed write is fatal), break paths and repair them.
 with_writer() {	# with_writer <break command> <expected failed paths> <repair command>
-	rm -f /tmp/stop /tmp/writer.err
-	writer & local w=$!
+	writer_start /dev/mapper/$MP $SIZE_MB
 	sleep 1
 	eval "$1"
 	wait_for 40 sh -c "[ \$(dmsetup status $MP | tr ' ' '\n' | grep -c '^F\$') = $2 ]" \
 		|| { touch /tmp/stop; fail "expected $2 failed paths, have: $(mp_states)"; }
 	echo "  states with the fault: $(mp_states)"
 	sleep 2		# keep writing on the remaining paths
-	touch /tmp/stop
-	wait $w || fail "writer: $(cat /tmp/writer.err 2>/dev/null)"
+	writer_stop
 	eval "$3"
 	reinstate_all
 	cmp /tmp/pat /dev/mapper/$MP || fail "data mismatch"

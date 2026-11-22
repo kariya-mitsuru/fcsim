@@ -35,7 +35,6 @@ modprobe loop
 truncate -s 256M /tmp/hang.img
 LOOP=$(losetup -f --show /tmp/hang.img)
 dmsetup create $DM --table "0 $(blockdev --getsz $LOOP) linear $LOOP 0"
-modprobe target_core_mod
 modprobe target_core_iblock
 load_fcsim tmr_timeout=1
 $TCLI /backstores/block create hang /dev/mapper/$DM >/dev/null
