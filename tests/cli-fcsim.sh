@@ -149,6 +149,71 @@ if $CTL fault set $I1 $T1 drop=none count=-2 2>/tmp/err; then fail "count=-2 acc
 [ "$(cat $R/drop) $(cat $R/count)" = "rsp 3" ] || fail "rejected update changed the rule"
 $CTL fault clear $I1 $T1
 
+step "fcsimctl's copies of the kernel defaults and limits match the kernel"
+# A fresh rule has the defaults; each limit is accepted, one past it is not.
+python3 -I - "$CTL" "$HOSTS/$I2/faults/$T1" <<'EOF' || fail "fcsimctl and the kernel disagree"
+import importlib.machinery, importlib.util, os, sys
+loader = importlib.machinery.SourceFileLoader("fcsimctl", sys.argv[1])
+m = importlib.util.module_from_spec(importlib.util.spec_from_loader("fcsimctl", loader))
+loader.exec_module(m)
+rule = sys.argv[2]
+
+def accepts(path, value):
+    try:
+        with open(path, "w") as f:
+            f.write(str(value))
+        return True
+    except OSError:
+        return False
+
+os.mkdir(rule)
+try:
+    for k, v in m.FAULT_DEFAULTS.items():
+        have = open(os.path.join(rule, k)).read().strip()
+        assert have == v, "default %s: kernel %s, fcsimctl %s" % (k, have, v)
+    for k, (lo, hi) in m.FAULT_RANGES.items():
+        p = os.path.join(rule, k)
+        assert accepts(p, lo) and accepts(p, hi), "%s: %d..%d not accepted" % (k, lo, hi)
+        assert not accepts(p, lo - 1) and not accepts(p, hi + 1), "%s: beyond %d..%d accepted" % (k, lo, hi)
+    for k, choices in m.FAULT_CHOICES.items():
+        p = os.path.join(rule, k)
+        for c in choices:
+            assert accepts(p, c), "%s=%s not accepted" % (k, c)
+        assert not accepts(p, "bogus"), "%s=bogus accepted" % k
+finally:
+    os.rmdir(rule)
+
+z = os.path.join(m.ZONES, "zlimit")
+os.mkdir(z)
+try:
+    members = ["30:00:00:00:00:00:%02x:%02x" % (i // 256, i % 256)
+               for i in range(1, m.ZONE_MAX_MEMBERS + 2)]
+    p = os.path.join(z, "members")
+    assert accepts(p, " ".join(members[:-1])), "ZONE_MAX_MEMBERS not accepted"
+    assert not accepts(p, " ".join(members)), "ZONE_MAX_MEMBERS + 1 accepted"
+finally:
+    os.rmdir(z)
+# ZONE_MAX_ZONES: zone-fcsim.sh fills the kernel's 1024 zones.
+assert m.ZONE_MAX_ZONES == 1024
+print("  defaults, ranges, choices and ZONE_MAX_MEMBERS agree")
+EOF
+
+step "fcsimctl usage errors and help"
+for args in "zone commit junk" "zone list junk" "zone delete z1 junk" "fault list $I1"; do
+	if $CTL $args 2>/tmp/err; then fail "fcsimctl $args accepted"; fi
+	echo "  $args: $(cat /tmp/err)"
+done
+grep -q "takes" /tmp/err || fail "fault list: not a usage error"
+$CTL --help | grep -q "invalid_tx_word" || fail "--help does not list the FPIN events"
+# targetcli cannot name an initiator 30:... in an ACL: host create warns.
+$CTL host create 30:00:00:00:c9:00:00:03 --link down 2>/tmp/err
+grep -q "warning: targetcli cannot name" /tmp/err || fail "no warning for a non-rtslib WWPN"
+$CTL host create 10:00:00:00:c9:00:00:04 --link down 2>/tmp/err
+[ ! -s /tmp/err ] || fail "warning for an rtslib WWPN: $(cat /tmp/err)"
+$CTL host delete 30:00:00:00:c9:00:00:03
+$CTL host delete 10:00:00:00:c9:00:00:04
+if $CTL host delete 10:00:00:00:c9:00:00:04 2>/tmp/err; then fail "deleted a missing host"; fi
+
 step "restore rejects a bad file without touching the fabric"
 $CTL save /tmp/fcsim-before.json
 bad_restore() {	# <description> <python expression editing c>

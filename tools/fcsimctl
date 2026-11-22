@@ -1,9 +1,6 @@
 #!/usr/bin/python3 -s
 """fcsimctl - manage the initiator side and fabric of tcm_fcsim.
 
-The target side (LUNs, ACLs) is managed with targetcli / targetctl through
-tools/fcsim-targetcli and tools/fcsim-targetctl.
-
   fcsimctl status [--json]
   fcsimctl host create <wwpn> [--wwnn <wwnn>] [--link up|down]
   fcsimctl host delete <wwpn>
@@ -29,9 +26,24 @@ tools/fcsim-targetcli and tools/fcsim-targetctl.
   fcsimctl restore <file.json>
   fcsimctl clear
 
+FPIN (the first event is the default):
+  li <wwpn> [event] [count=N (1)] [threshold=ms (1000)]
+       link_failure loss_of_sync loss_of_signal prim_seq_err
+       invalid_tx_word invalid_crc device_specific unknown
+  pn <wwpn> [event] [period=ms (1000)]
+  cn <initiator wwpn> [event] [severity=warning|error (warning)] [period=ms (1000)]
+       pn and cn: credit_stall lost_credit oversubscription device_specific clear
+  dn <wwpn> [reason]
+       timeout unable_to_route device_specific unknown
+
 WWPNs are accepted as 10:00:00:00:c9:00:00:01, naa.10000000c9000001,
-0x10000000c9000001 or 10000000c9000001.  Restore the target side
-(fcsim-targetctl restore) before the initiator side.
+0x10000000c9000001 or 10000000c9000001.  targetcli (rtslib) only takes
+naa WWNs whose first hex digit is 1, 2, 5 or c-f; host create warns about
+an initiator WWPN it cannot name in an ACL.
+
+The target side is managed with fcsim-targetcli.  fcsim-targetctl
+save/restore/clear act on the whole of LIO, not only fcsim.  Restore the
+target side before the initiator side.
 """
 
 import argparse
@@ -46,6 +58,10 @@ HOSTS = CFS + "/hosts"
 ZONING = CFS + "/zoning"
 ZONES = CFS + "/zones"
 LIO_FABRIC = "/sys/kernel/config/target/fcsim"
+# These mirror the kernel; keep them in step (tests/cli-fcsim.sh checks the
+# limits against it).  src/fcsim_fault.c: defaults in fcsim_faults_make_rule,
+# fcsim_drop_names, fcsim_error_names, FCSIM_FAULT_MAX_DELAY_MS and the
+# probability / count stores.  src/fcsim_zone.c: FCSIM_ZONE_MAX_*.
 FAULT_ATTRS = ("delay_ms", "drop", "error", "probability", "count")
 FAULT_DEFAULTS = {"delay_ms": "0", "drop": "none", "error": "none",
                   "probability": "100", "count": "-1"}
@@ -78,6 +94,12 @@ def wwn(text):
     return ":".join(t[i:i + 2] for i in range(0, 16, 2))
 
 
+def rtslib_naa_ok(w):
+    """rtslib (targetcli, targetctl) takes naa.[125c-f]..., see
+    rtslib_fb.utils.normalize_wwn."""
+    return w[0] in "125cdef"
+
+
 def rule_name(text):
     return "any" if text == "any" else wwn(text)
 
@@ -98,6 +120,32 @@ def write(path, value):
             f.write(str(value))
     except OSError as e:
         raise Error("%s: %s" % (path, e.strerror))
+
+
+def make_dir(path, what):
+    """mkdir a configfs group that must not exist yet."""
+    if os.path.isdir(path):
+        raise Error("%s exists: %s" % (what, os.path.basename(path)))
+    try:
+        os.mkdir(path)
+    except OSError as e:
+        raise Error("mkdir %s: %s" % (path, e.strerror))
+
+
+def remove_dir(path):
+    try:
+        os.rmdir(path)
+    except OSError as e:
+        raise Error("rmdir %s: %s" % (path, e.strerror))
+
+
+def write_json(path, obj):
+    """Write obj as JSON, replacing path only once it is complete."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(obj, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 def lines(path):
@@ -215,7 +263,6 @@ def fabric_state():
 # ------------------------------------------------------------------ commands
 
 def cmd_status(args):
-    check_loaded()
     st = fabric_state()
     if args.json:
         json.dump(st, sys.stdout, indent=2)
@@ -261,12 +308,7 @@ def cmd_status(args):
 
 def host_create(w, wwnn=None, link="up"):
     d = os.path.join(HOSTS, w)
-    if os.path.isdir(d):
-        raise Error("host exists: %s" % w)
-    try:
-        os.mkdir(d)
-    except OSError as e:
-        raise Error("mkdir %s: %s" % (d, e.strerror))
+    make_dir(d, "host")
     # A new port starts with its link down: nothing logs in before it is set up.
     try:
         if wwnn:
@@ -282,14 +324,18 @@ def host_create(w, wwnn=None, link="up"):
 def host_delete(w):
     d = host_dir(w)
     for fd in glob.glob(d + "/faults/*"):
-        os.rmdir(fd)
-    os.rmdir(d)
+        remove_dir(fd)
+    remove_dir(d)
 
 
 def cmd_host(args):
-    check_loaded()
     w = wwn(args.wwpn)
     if args.action == "create":
+        if not rtslib_naa_ok(w):
+            print("fcsimctl: warning: targetcli cannot name %s in an ACL "
+                  "(naa WWNs must start with 1, 2, 5 or c-f); use "
+                  "generate_node_acls or the configfs directory" % w,
+                  file=sys.stderr)
         host_create(w, wwn(args.wwnn) if args.wwnn else None, args.link)
         print("%s: %s" % (w, read(os.path.join(HOSTS, w, "scsi_host"))))
     else:
@@ -297,12 +343,10 @@ def cmd_host(args):
 
 
 def cmd_link(args):
-    check_loaded()
     write(host_dir(args.wwpn) + "/link", args.state)
 
 
 def cmd_lip(args):
-    check_loaded()
     shost = read(host_dir(args.wwpn) + "/scsi_host")
     write("/sys/class/fc_host/%s/issue_lip" % shost, "1")
 
@@ -338,10 +382,7 @@ def fault_set(hdir, target, attrs):
     fd = os.path.join(hdir, "faults", target)
     created = not os.path.isdir(fd)
     if created:
-        try:
-            os.mkdir(fd)
-        except OSError as e:
-            raise Error("mkdir %s: %s" % (fd, e.strerror))
+        make_dir(fd, "fault rule")
         old = dict(FAULT_DEFAULTS)
     else:
         old = {k: read(os.path.join(fd, k)) for k in FAULT_ATTRS}
@@ -367,7 +408,10 @@ def fault_set(hdir, target, attrs):
 
 
 def cmd_fault(args):
-    check_loaded()
+    if args.action == "list" and (args.initiator or args.target):
+        raise Error("fault list takes no arguments")
+    if args.action == "clear" and args.attrs:
+        raise Error("fault clear: <initiator> [<target|any>] only")
     if args.action == "list":
         for w in host_wwpns():
             for f in host_state(w)["faults"]:
@@ -394,11 +438,10 @@ def cmd_fault(args):
         for t in targets:
             fd = os.path.join(hdir, "faults", t)
             if os.path.isdir(fd):
-                os.rmdir(fd)
+                remove_dir(fd)
 
 
 def cmd_stats(args):
-    check_loaded()
     shost = read(host_dir(args.wwpn) + "/scsi_host")
     sdir = "/sys/class/fc_host/%s/statistics" % shost
     if args.reset:
@@ -460,13 +503,7 @@ def zone_set_members(name, members):
 
 
 def zone_create(name, members=()):
-    d = zone_dir(name, must_exist=False)
-    if os.path.isdir(d):
-        raise Error("zone exists: %s" % name)
-    try:
-        os.mkdir(d)
-    except OSError as e:
-        raise Error("mkdir %s: %s" % (d, e.strerror))
+    make_dir(zone_dir(name, must_exist=False), "zone")
     if members:
         zone_set_members(name, members)
 
@@ -475,7 +512,7 @@ def zones_replace_staged(mode, zones):
     """Make the staged configuration exactly (mode, zones)."""
     for name in staged_zones():
         if name not in zones:
-            os.rmdir(zone_dir(name))
+            remove_dir(zone_dir(name))
     have = staged_zones()
     for name, members in zones.items():
         if name not in have:
@@ -489,8 +526,9 @@ def zone_commit():
 
 
 def cmd_zone(args):
-    check_loaded()
     a, rest = args.action, args.args
+    if a in ("list", "commit", "revert") and rest:
+        raise Error("zone %s takes no arguments" % a)
     if a == "list":
         st = zoning_state()
         for which in ("active", "staged"):
@@ -502,11 +540,13 @@ def cmd_zone(args):
     elif a in ("create", "delete", "add", "remove"):
         if not rest:
             raise Error("zone %s: zone name required" % a)
+        if a == "delete" and len(rest) > 1:
+            raise Error("zone delete takes one zone name")
         name, members = rest[0], [wwn(m) for m in rest[1:]]
         if a == "create":
             zone_create(name, members)
         elif a == "delete":
-            os.rmdir(zone_dir(name))
+            remove_dir(zone_dir(name))
         else:
             if not members:
                 raise Error("zone %s: WWPNs required" % a)
@@ -530,7 +570,6 @@ def cmd_zone(args):
 
 
 def cmd_fpin(args):
-    check_loaded()
     write(CFS + "/fpin", " ".join([args.kind, wwn(args.wwpn)] + args.opts))
 
 
@@ -553,13 +592,7 @@ def saved_config():
 
 
 def cmd_save(args):
-    check_loaded()
-    cfg = saved_config()
-    tmp = args.file + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(cfg, f, indent=2)
-        f.write("\n")
-    os.replace(tmp, args.file)
+    write_json(args.file, saved_config())
 
 
 def clear_all():
@@ -570,7 +603,6 @@ def clear_all():
 
 
 def cmd_clear(args):
-    check_loaded()
     clear_all()
 
 
@@ -660,7 +692,6 @@ def restore_apply(plan):
 
 
 def cmd_restore(args):
-    check_loaded()
     try:
         with open(args.file) as f:
             cfg = json.load(f)
@@ -679,9 +710,7 @@ def cmd_restore(args):
     except (Error, OSError) as e:
         bak = args.file + ".before-restore"
         try:
-            with open(bak, "w") as f:
-                json.dump(backup, f, indent=2)
-                f.write("\n")
+            write_json(bak, backup)
             hint = "the previous configuration is in %s (fcsimctl restore %s)" % (bak, bak)
         except OSError:
             hint = "previous configuration:\n" + json.dumps(backup, indent=2)
@@ -692,8 +721,8 @@ def cmd_restore(args):
 
 def main():
     p = argparse.ArgumentParser(
-        prog="fcsimctl", description=__doc__.split("\n\n")[0],
-        epilog="Target side: fcsim-targetcli / fcsim-targetctl.")
+        prog="fcsimctl", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("status", help="show the fabric")
@@ -754,6 +783,7 @@ def main():
 
     args = p.parse_args()
     try:
+        check_loaded()
         args.func(args)
     except (Error, OSError) as e:
         print("fcsimctl: %s" % e, file=sys.stderr)
