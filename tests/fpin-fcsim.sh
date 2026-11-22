@@ -93,7 +93,7 @@ write_multipath_conf "	marginal_pathgroups	fpin" '
 	no_path_retry		8'
 start_multipathd 3 4
 # keep multipathd's log next to the test output for debugging
-trap 'cp /tmp/multipathd.log "$TOP/.test-out/fpin-multipathd.log" 2>/dev/null; stop_multipathd' EXIT
+trap 'cp /tmp/multipathd.log "$TOP/.test-out/fpin${TEST_TAG:+-$TEST_TAG}-multipathd.log" 2>/dev/null; stop_multipathd' EXIT
 multipath -ll "$MAP" | sed 's/^/  /'
 
 # the sd devices behind T1 / T2

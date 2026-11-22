@@ -18,7 +18,7 @@
 #                   tree, minus .gitignore'd files; needs rpm-build)
 #   make test-rpm   install that RPM in an AlmaLinux 9 kernel guest (overlay,
 #                   the host stays untouched) and check dkms + tools
-#   make clean
+#   make clean      also removes rpmbuild/ and .test-out/; works without KDIR
 KDIR ?= $(HOME)/build/linux-6.18
 VERSION := $(shell sed -n 's/^\#define FCSIM_VERSION[[:space:]]*"\(.*\)"/\1/p' src/fcsim.h)
 
@@ -32,8 +32,8 @@ all:
 	$(MAKE) -C $(KDIR) M=$(CURDIR)/src W=1 modules
 
 clean:
-	$(MAKE) -C $(KDIR) M=$(CURDIR)/src clean
-	rm -rf build
+	if [ -e $(KDIR)/Makefile ]; then $(MAKE) -C $(KDIR) M=$(CURDIR)/src clean; fi
+	rm -rf build rpmbuild .test-out
 
 # A copy of src/ per kernel, so builds for different kernels do not mix objects.
 kver:
@@ -93,6 +93,7 @@ rpm:
 test-rpm: export KIMG = /lib/modules/$(EL9_KVER)/vmlinuz
 test-rpm: export TEST_TAG = el9
 test-rpm: rpm
-	scripts/run-guest-test.sh package tests/package-el9.sh
+	@test -n "$(EL9_KVER)" || { echo "no AlmaLinux 9 kernel in /lib/modules"; exit 1; }
+	scripts/run-guest-test.sh package tests/package-el9.sh $(VERSION)
 
 .PHONY: all clean kver el9 wsl rpm test test-el9 test-wsl test-rpm

@@ -50,6 +50,12 @@ echo "  input requests $in_req, ${in_mb} MiB; output requests $out_req, ${out_mb
 [ "$in_req" -ge 8 ] && [ "$out_req" -ge 4 ] || fail "requests"
 [ "$(hexval $S/rx_frames)" -ge $((8 * 512)) ] || fail "rx_frames"	# 8 MiB / 2 KiB
 [ "$(hexval $S/tx_frames)" -ge $((4 * 512)) ] || fail "tx_frames"
+[ "$(hexval $S/rx_words)" -ge $((8 << 18)) ] || fail "rx_words"	# 8 MiB / 4
+[ "$(hexval $S/tx_words)" -ge $((4 << 18)) ] || fail "tx_words"
+s1=$(hexval $S/seconds_since_last_reset)
+[ "$s1" -lt 30 ] || fail "seconds_since_last_reset $s1 right after a reset"
+sleep 2
+[ "$(hexval $S/seconds_since_last_reset)" -ge $((s1 + 1)) ] || fail "seconds_since_last_reset does not advance"
 before=$(hexval $S/link_failure_count)
 $CTL link $I1 down; $CTL link $I1 up
 [ "$(hexval $S/link_failure_count)" = $((before + 1)) ] || fail "link_failure_count"
@@ -120,6 +126,10 @@ if $CTL link 10:00:00:00:c9:00:00:77 up 2>/tmp/err; then fail "unknown host acce
 cat /tmp/err
 if $CTL host create 12:34 2>/tmp/err; then fail "bad WWPN accepted"; fi
 cat /tmp/err
+# The WWNN is fixed while the port is on the fabric (link up).
+[ "$(cat $HOSTS/$I1/link)" = up ] || fail "I1 link not up"
+if echo 20:00:00:00:c9:00:00:98 2>/tmp/err > $HOSTS/$I1/node_name; then fail "node_name changed with link up"; fi
+grep -q "busy" /tmp/err || fail "node_name with link up: $(cat /tmp/err)"
 # A zone name is a path component: it must not reach outside zones/
 # (I2 has no fault rules, so rmdir of its port would succeed).
 for a in delete add; do

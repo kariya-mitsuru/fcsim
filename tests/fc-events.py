@@ -3,7 +3,9 @@
 
     fc-events.py <seconds>
 
-Each line: "host<N> <event name> 0x<event data>".
+The first line is "listening" once the socket is bound: events posted after
+it are caught (start_events in tests/lib.sh waits for it).  Then each line:
+"host<N> <event name> 0x<event data>".
 """
 import socket
 import struct

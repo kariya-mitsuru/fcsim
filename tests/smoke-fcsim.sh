@@ -93,10 +93,16 @@ cmp /tmp/pattern /tmp/readback || fail "data mismatch after link up"
 echo "OK: same rport came back, data intact"
 
 step "remove ACL (session closed and re-logged in with dynamic ACL)"
+# The logout is asynchronous (close_session only kicks the fabric): the old
+# session may still be listed right after the rmdir, so wait for the
+# logout and the new login in that order.
+dmesg -C
 rm "$TPG/acls/$IWWPN/lun_0/map"
 rmdir "$TPG/acls/$IWWPN/lun_0"
 rmdir "$TPG/acls/$IWWPN"
-wait_for 5 grep -q "$TWWPN" "$HOSTS/$IWWPN/targets" || fail "not re-logged in"
+relogged() { dmesg | sed -n "/logout $IWWPN -> $TWWPN/,\$p" | grep -q "login $IWWPN -> $TWWPN"; }
+wait_for 5 relogged || { dmesg | grep tcm_fcsim; fail "not logged out and in again"; }
+grep -q "$TWWPN" "$HOSTS/$IWWPN/targets" || fail "not in targets after the new login"
 echo "targets: $(cat "$HOSTS/$IWWPN/targets")"
 
 step "teardown"

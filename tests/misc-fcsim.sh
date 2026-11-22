@@ -62,6 +62,15 @@ more=$(tail -1 $TPG/sessions | sed -n 's/^\.\.\. \([0-9]*\) more$/\1/p')
 [ $((lines - 1 + more)) = $N ] || fail "listed $((lines - 1)) + $more more != $N"
 [ "$(wc -c < $TPG/sessions)" -le 4096 ] || fail "page overflow"
 echo "  ok: $((lines - 1)) listed + $more more = $N"
+# fcsimctl counts the sessions that did not fit, in the text and JSON status.
+"$TOP/tools/fcsimctl" status | grep -q " sessions $N\$" || fail "fcsimctl status: not $N sessions"
+"$TOP/tools/fcsimctl" status --json | python3 -c '
+import json, sys
+t = json.load(sys.stdin)["targets"][0]
+assert t["sessions_more"] > 0, t["sessions_more"]
+assert len(t["sessions"]) + t["sessions_more"] == int(sys.argv[1]), t["sessions_more"]
+' $N || fail "fcsimctl status --json: sessions_more"
+echo "  ok: fcsimctl status counts all $N"
 for h in "$HOSTS"/*; do rmdir "$h"; done
 
 step "tmr_timeout range, TPG name"

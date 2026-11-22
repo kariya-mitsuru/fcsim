@@ -3,6 +3,7 @@
 # see make test-rpm; the guest's /usr and /var are overlays, so nothing is
 # installed on the host).  Needs dkms, kernel-devel-$(uname -r), targetcli
 # installed on the host and the RPM built by make rpm.
+#   package-el9.sh <version>   (FCSIM_VERSION, passed by make test-rpm)
 set -euo pipefail
 
 TOP=$(cd "$(dirname "$0")/.." && pwd)
@@ -13,7 +14,12 @@ CTL=/usr/bin/fcsimctl
 T1=21:00:00:00:00:00:00:01
 I1=10:00:00:00:c9:00:00:01
 
-RPM=$(ls "$TOP"/rpmbuild/RPMS/noarch/tcm_fcsim-*.rpm | tail -1)
+VERSION=${1:?usage: $0 <version>}
+
+# The RPM of this version; older ones may still be in rpmbuild/.
+RPMS=("$TOP"/rpmbuild/RPMS/noarch/tcm_fcsim-"$VERSION"-*.noarch.rpm)
+[ ${#RPMS[@]} = 1 ] && [ -e "${RPMS[0]}" ] || fail "expected one tcm_fcsim-$VERSION RPM, found: ${RPMS[*]}"
+RPM=${RPMS[0]}
 
 step "without kernel-devel the install succeeds but says why there is no module"
 KBUILD=/lib/modules/$(uname -r)/build

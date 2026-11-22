@@ -8,13 +8,15 @@
 #                         by the late completion.  Same for a LUN reset.
 #   race-fcsim.sh close   LIO close_session (ACL removal) racing with a
 #                         fabric logout (link down)
-#   race-fcsim.sh deliver EH (a host reset) terminating a delayed command
+#   race-fcsim.sh deliver a command terminated (as by an EH abort, DID_ABORT)
 #                         between target_init_cmd() and the hand-over to
-#                         LIO: the command must never reach the target
+#                         LIO: it must never reach the target, and its
+#                         session command reference must be dropped
 #
-# They use the test-only module parameters dbg_release_delay_ms /
-# dbg_close_delay_ms / dbg_deliver_delay_ms to widen the windows.  Run each scenario in its own
-# guest: a regression may crash the kernel.
+# They use the test-only module parameters dbg_release_delay_ms and
+# dbg_close_delay_ms, which widen the windows, and dbg_deliver_terminate,
+# which terminates the next TEST UNIT READY right inside the window.  Run
+# each scenario in its own guest: a regression may crash the kernel.
 set -euo pipefail
 
 TOP=$(cd "$(dirname "$0")/.." && pwd)
