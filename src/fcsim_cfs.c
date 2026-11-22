@@ -4,10 +4,11 @@
  *
  *   /sys/kernel/config/fcsim/
  *     fabric_name, version                 (ro)
- *     hosts/<initiator WWPN>/              mkdir = create a virtual HBA port
+ *     hosts/<initiator WWPN>/              mkdir = create a virtual HBA port,
+ *                                          link down: set it up, then "link up"
  *       port_name, port_id, scsi_host, targets   (ro)
  *       node_name                          (rw while link is down)
- *       link                               (rw: up / down)
+ *       link                               (rw: up / down, initially down)
  *       draining                           (ro) logged-out sessions not yet drained
  *       faults/<target WWPN | any>/        fault injection rules (fcsim_fault.c)
  *   zoning/, zones/                        zoning (fcsim_zone.c)

@@ -22,6 +22,7 @@ cat $TPG/attrib/generate_node_acls
 step "refused login is logged once, not on every retry"
 dmesg -C
 mkdir "$HOSTS/$I1"
+echo up > "$HOSTS/$I1/link"
 H1=$(host_of $I1)
 for _ in 1 2 3; do
 	echo 1 > /sys/class/fc_host/$H1/issue_lip
@@ -50,7 +51,9 @@ step "sessions list longer than a page"
 echo 1 > $TPG/attrib/generate_node_acls
 N=180
 for i in $(seq $N); do
-	mkdir "$HOSTS/$(printf '10:00:00:00:c9:00:%02x:%02x' $((i / 256)) $((i % 256)))"
+	h=$HOSTS/$(printf '10:00:00:00:c9:00:%02x:%02x' $((i / 256)) $((i % 256)))
+	mkdir "$h"
+	echo up > "$h/link"
 done
 lines=$(wc -l < $TPG/sessions)
 tail -2 $TPG/sessions | sed 's/^/  /'

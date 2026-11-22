@@ -55,6 +55,11 @@ grep . "$TPG"/{node_name,port_id} "$TPG"/attrib/*
 step "initiator side: create host $IWWPN"
 mkdir "$HOSTS/$IWWPN"
 HOST=$(cat "$HOSTS/$IWWPN/scsi_host")
+# A new port starts off the fabric: link down, no login yet.
+[ "$(cat "$HOSTS/$IWWPN/link")" = down ] || fail "new host: link $(cat "$HOSTS/$IWWPN/link")"
+[ "$(cat /sys/class/fc_host/$HOST/port_state)" = Linkdown ] || fail "new host: port_state $(cat /sys/class/fc_host/$HOST/port_state)"
+[ -z "$(cat "$HOSTS/$IWWPN/targets")" ] || fail "new host logged in before link up"
+echo up > "$HOSTS/$IWWPN/link"
 echo "scsi host: $HOST  targets: $(cat "$HOSTS/$IWWPN/targets")  sessions: $(cat "$TPG/sessions")"
 for a in port_name node_name port_id port_type port_state speed fabric_name symbolic_name; do
 	printf '  fc_host/%-14s %s\n' "$a" "$(cat /sys/class/fc_host/$HOST/$a)"

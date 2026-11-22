@@ -28,6 +28,7 @@ $TCLI /backstores/ramdisk create shared ${SIZE_MB}M >/dev/null
 make_tport $T1 /backstores/ramdisk/shared $I1 $I2
 make_tport $T2 /backstores/ramdisk/shared $I1 $I2
 mkdir "$HOSTS/$I1" "$HOSTS/$I2"
+echo up > "$HOSTS/$I1/link"; echo up > "$HOSTS/$I2/link"
 H1=$(host_of $I1); H2=$(host_of $I2)
 
 paths() {	# all sd devices of the shared LUN, one per line

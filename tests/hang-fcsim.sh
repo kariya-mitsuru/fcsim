@@ -43,6 +43,7 @@ $TCLI /backstores/ramdisk create rd0 16M >/dev/null
 make_tport $T1 /backstores/block/hang $I1 $I2
 make_tport $T2 /backstores/ramdisk/rd0 $I1 $I2
 mkdir "$HOSTS/$I1" "$HOSTS/$I2"
+echo up > "$HOSTS/$I1/link"; echo up > "$HOSTS/$I2/link"
 H1=$(host_of $I1); H2=$(host_of $I2)
 wait_for 10 disk_of "$H1" hang || fail "I1 hang LUN missing"
 wait_for 10 disk_of "$H1" rd0 || fail "I1 rd0 LUN missing"
@@ -68,6 +69,7 @@ wait_for 10 disk_of "$H2" rd0 || fail "I2 did not log back in"
 RD2=$(disk_of "$H2" rd0)
 within 5 dd if=/dev/$RD2 of=/dev/null bs=1M count=4 iflag=direct status=none
 within 5 mkdir "$HOSTS/$I3"
+within 5 sh -c "echo up > $HOSTS/$I3/link"
 within 3 cat "$HOSTS/$I3/targets"
 within 5 rmdir "$HOSTS/$I3"
 within 3 cat "$LIO/fcsim/$T1/tpgt_1/sessions"

@@ -1068,7 +1068,11 @@ struct fcsim_iport *fcsim_iport_create(u64 wwpn)
 	iport->stats_reset = jiffies;
 	iport->wwpn = wwpn;
 	iport->wwnn = fcsim_default_wwnn(wwpn);
-	iport->link_up = true;
+	/*
+	 * A new port is not on the fabric yet: node_name and fault rules can be
+	 * set before the first "link up" logs it in, like enabling a LIO TPG.
+	 */
+	iport->link_up = false;
 	fcsim_format_wwn(iport->name, sizeof(iport->name), wwpn);
 
 	mutex_lock(&fcsim_mutex);
@@ -1114,11 +1118,8 @@ struct fcsim_iport *fcsim_iport_create(u64 wwpn)
 	list_move_tail(&iport->node, &fcsim_iports);
 	mutex_unlock(&fcsim_mutex);
 
-	pr_info("host%u: initiator port %s (port_id 0x%06x) created\n",
+	pr_info("host%u: initiator port %s (port_id 0x%06x) created, link down\n",
 		shost->host_no, iport->name, iport->port_id);
-
-	/* Log in to every online target port. */
-	fcsim_fabric_sync();
 	return iport;
 
 out_put:

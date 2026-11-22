@@ -64,6 +64,7 @@ ln -s "$RD" "$TPG/lun/lun_0/rd0"
 ln -s "$TPG/lun/lun_0" "$TPG/acls/$IWWPN/lun_0/map"
 echo 1 > "$TPG/enable"
 mkdir "$HOSTS/$IWWPN"
+echo up > "$HOSTS/$IWWPN/link"
 HOST=$(cat "$HOSTS/$IWWPN/scsi_host")
 wait_for 5 fcsim_disk || fail "LUN did not appear"
 DISK=$(fcsim_disk)

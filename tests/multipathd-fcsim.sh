@@ -36,6 +36,7 @@ $TCLI /backstores/ramdisk create shared ${SIZE_MB}M >/dev/null
 make_tport $T1 /backstores/ramdisk/shared $I1 $I2
 make_tport $T2 /backstores/ramdisk/shared $I1 $I2
 mkdir "$HOSTS/$I1" "$HOSTS/$I2"
+echo up > "$HOSTS/$I1/link"; echo up > "$HOSTS/$I2/link"
 wait_for 10 sh -c "[ \$(ls -d /sys/class/fc_transport/target*/device/*/block/* 2>/dev/null | wc -l) = 4 ]" \
 	|| fail "expected 4 paths"
 udevadm settle

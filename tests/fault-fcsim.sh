@@ -19,6 +19,7 @@ $TCLI /backstores/ramdisk create rd1 16M >/dev/null
 make_tport $T1 /backstores/ramdisk/rd0 $I1
 make_tport $T2 /backstores/ramdisk/rd1 $I1
 mkdir "$HOSTS/$I1"
+echo up > "$HOSTS/$I1/link"
 H1=$(host_of $I1)
 wait_for 10 disk_of "$H1" rd0 || fail "LUN missing"
 D=$(disk_of "$H1" rd0)

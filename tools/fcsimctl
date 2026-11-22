@@ -104,6 +104,19 @@ def lines(path):
     return [l for l in read(path, "").splitlines() if l]
 
 
+def wwn_list(path):
+    """(names, more) of a kernel WWN list attribute.  A list longer than a
+    page ends in "... N more" instead of the remaining N names."""
+    names, more = [], 0
+    for l in lines(path):
+        m = re.fullmatch(r"\.\.\. (\d+) more", l)
+        if m:
+            more += int(m.group(1))
+        else:
+            names.append(l)
+    return names, more
+
+
 def check_loaded():
     if not os.path.isdir(HOSTS):
         raise Error("tcm_fcsim is not loaded (%s missing)" % HOSTS)
@@ -156,6 +169,7 @@ def host_state(w):
         for a in FAULT_ATTRS + ("injected",):
             f[a] = read(os.path.join(fd, a))
         faults.append(f)
+    targets, targets_more = wwn_list(d + "/targets")
     return {
         "wwpn": w,
         "wwnn": read(d + "/node_name"),
@@ -164,7 +178,8 @@ def host_state(w):
         "scsi_host": shost,
         "port_state": read(fch + "/port_state", "?"),
         "speed": read(fch + "/speed", "?"),
-        "targets": lines(d + "/targets"),
+        "targets": targets,
+        "targets_more": targets_more,	# not listed (page full)
         "draining": int(read(d + "/draining", "0")),
         "rports": rports,
         "faults": faults,
@@ -174,13 +189,15 @@ def host_state(w):
 def target_state():
     out = []
     for t in sorted(glob.glob(LIO_FABRIC + "/*/tpgt_1")):
+        sessions, sessions_more = wwn_list(t + "/sessions")
         out.append({
             "wwpn": os.path.basename(os.path.dirname(t)),
             "port_id": read(t + "/port_id", "?"),
             "enabled": read(t + "/enable", "0") == "1",
             "luns": len(glob.glob(t + "/lun/lun_*")),
             "acls": sorted(os.path.basename(a) for a in glob.glob(t + "/acls/*")),
-            "sessions": lines(t + "/sessions"),
+            "sessions": sessions,
+            "sessions_more": sessions_more,	# not listed (page full)
         })
     return out
 
@@ -219,7 +236,7 @@ def cmd_status(args):
     for t in st["targets"]:
         print("  %s  port_id %s  %s  luns %d  acls %d  sessions %d" % (
             t["wwpn"], t["port_id"], "enabled" if t["enabled"] else "disabled",
-            t["luns"], len(t["acls"]), len(t["sessions"])))
+            t["luns"], len(t["acls"]), len(t["sessions"]) + t["sessions_more"]))
     print()
     print("initiator ports:")
     if not st["hosts"]:
@@ -250,12 +267,15 @@ def host_create(w, wwnn=None, link="up"):
         os.mkdir(d)
     except OSError as e:
         raise Error("mkdir %s: %s" % (d, e.strerror))
-    if wwnn and wwnn != read(d + "/node_name"):
-        write(d + "/link", "down")	# node_name is only writable while down
-        write(d + "/node_name", wwnn)
-        write(d + "/link", link)
-    elif link != "up":
-        write(d + "/link", link)
+    # A new port starts with its link down: nothing logs in before it is set up.
+    try:
+        if wwnn:
+            write(d + "/node_name", wwnn)
+        if link == "up":
+            write(d + "/link", "up")
+    except Error:
+        os.rmdir(d)
+        raise
     return d
 
 
@@ -630,8 +650,8 @@ def restore_apply(plan):
     zones_replace_staged(plan["mode"], plan["zones"])
     zone_commit()
     for h in plan["hosts"]:
-        # A new host logs in right away; take the link down while the fault
-        # rules go in, so that I/O after the restore sees all of them.
+        # The link comes up only after the fault rules are in, so that I/O
+        # after the restore sees all of them.
         d = host_create(h["wwpn"], h["wwnn"], "down")
         for t, attrs in h["faults"]:
             fault_set(d, t, attrs)

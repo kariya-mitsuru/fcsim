@@ -44,6 +44,7 @@ cat /sys/kernel/config/target/fcsim/21:00:00:00:00:00:00:01/tpgt_1/enable
 
 step "initiator host"
 mkdir "$HOSTS/$IWWPN"
+echo up > "$HOSTS/$IWWPN/link"
 wait_disks 2 || fail "expected 2 LUNs"
 lsscsi
 

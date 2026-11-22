@@ -176,13 +176,17 @@ targetcli 上では単一 TPG の fabric（qla2xxx と同じ）として `tpg1` 
 /sys/kernel/config/fcsim/
   fabric_name, version          (ro)
   hosts/
-    <initiator WWPN>/           mkdir で仮想 HBA ポート（Scsi_Host）が生える
+    <initiator WWPN>/           mkdir で仮想 HBA ポート（Scsi_Host）が生える（link down）
       port_name, port_id, scsi_host, targets   (ro)
       node_name                 (rw, link down 中のみ変更可)
-      link                      (rw: up / down)
+      link                      (rw: up / down、作成直後は down)
       draining                  (ro) ログアウト済みで drain 中のセッション数
       faults/<target WWPN|any>/ 障害注入ルール（上記）
 ```
+
+新しいポートは link down で作られ、`link` に up を書いたときに初めてファブリックに参加（ログイン）する。
+LIO の TPG を設定してから `enable` するのと同じく、node_name や障害ルールを設定し終えるまで
+ログインもスキャンも起きない。`fcsimctl host create` は既定でここまで（link up）行う。
 
 fc_host の統計（`/sys/class/fc_host/hostN/statistics/`）は iport ごとの per-CPU カウンタから返す。
 `fcp_{input,output,control}_requests`、`fcp_{input,output}_megabytes`、`tx/rx_frames`・`tx/rx_words`
