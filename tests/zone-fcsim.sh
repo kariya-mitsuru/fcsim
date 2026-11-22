@@ -124,6 +124,23 @@ echo "  active: $bytes bytes, $zones zones"
 [ "$bytes" -gt 4096 ] && [ "$zones" = 61 ] || fail "active truncated"
 expect $I1 "$T1"; expect $I2 "$T1"
 
+step "a slow commit does not overwrite a newer one"
+# The first commit sleeps between its snapshot and making it active
+# (dbg_commit_delay_ms); meanwhile the staged mode changes and is committed.
+# The slow commit must not then make its older snapshot active.
+echo on > $Z/mode
+$CTL zone commit
+echo 1500 > /sys/module/tcm_fcsim/parameters/dbg_commit_delay_ms
+echo 1 > $Z/commit &
+SLOW=$!
+sleep 0.5
+echo off > $Z/mode
+echo 1 > $Z/commit
+wait $SLOW
+grep '^mode' $Z/active | sed 's/^/  active: /'
+grep -q '^mode off$' $Z/active || fail "the slow commit replaced the newer configuration"
+[ "$(cat $Z/pending)" = 0 ] || fail "pending after both commits"
+
 step "teardown"
 $CTL clear
 teardown_all

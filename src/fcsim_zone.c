@@ -22,6 +22,8 @@
 #define pr_fmt(fmt) "tcm_fcsim: " fmt
 
 #include <linux/slab.h>
+#include <linux/delay.h>
+#include <linux/moduleparam.h>
 #include <linux/string.h>
 #include <linux/sort.h>
 #include <linux/bsearch.h>
@@ -56,7 +58,10 @@ struct fcsim_zoneset {
 	struct fcsim_zs_zone	zones[];	/* sorted by name */
 };
 
-/* Staged configuration. */
+/*
+ * Staged configuration.  Lock order: fcsim_zone_mutex, then fcsim_mutex
+ * (commit and pending compare the staged configuration with the active one).
+ */
 static DEFINE_MUTEX(fcsim_zone_mutex);
 static LIST_HEAD(fcsim_staged_zones);
 static bool fcsim_staged_on;
@@ -191,24 +196,47 @@ static void fcsim_zone_rscn(const struct fcsim_zoneset *old,
 	}
 }
 
+/*
+ * Test-only knob that widens a race window (tests/zone-fcsim.sh): the next
+ * commit sleeps this long between taking its snapshot and making it active.
+ * 0 (off) by default.
+ */
+static unsigned int dbg_commit_delay_ms;
+module_param(dbg_commit_delay_ms, uint, 0644);
+MODULE_PARM_DESC(dbg_commit_delay_ms,
+		 "test only: delay the next zoning commit after its snapshot (one-shot)");
+
 static int fcsim_zone_commit(void)
 {
 	struct fcsim_zoneset *new, *old;
+	unsigned int delay;
 
+	/*
+	 * Keep the staged configuration locked until the snapshot is active:
+	 * otherwise a concurrent commit with a newer snapshot could become
+	 * active first and then be replaced by this older one.
+	 */
 	mutex_lock(&fcsim_zone_mutex);
 	new = fcsim_zoneset_from_staged();
-	mutex_unlock(&fcsim_zone_mutex);
-	if (IS_ERR(new))
+	if (IS_ERR(new)) {
+		mutex_unlock(&fcsim_zone_mutex);
 		return PTR_ERR(new);
+	}
+
+	delay = xchg(&dbg_commit_delay_ms, 0);
+	if (delay)
+		msleep(delay);
 
 	mutex_lock(&fcsim_mutex);
 	old = fcsim_active_zs;
 	fcsim_zone_rscn(old, new);
 	fcsim_active_zs = new;
-	mutex_unlock(&fcsim_mutex);
-
+	/* Once unlocked, a later commit may free @new. */
 	pr_info("zoning committed: mode %s, %u zone(s)\n",
 		new->on ? "on" : "off", new->nzones);
+	mutex_unlock(&fcsim_mutex);
+	mutex_unlock(&fcsim_zone_mutex);
+
 	fcsim_zoneset_free(old);
 
 	/* Log the affected pairs out and in. */
@@ -415,13 +443,14 @@ static ssize_t fcsim_zoning_pending_show(struct config_item *item, char *page)
 
 	mutex_lock(&fcsim_zone_mutex);
 	staged = fcsim_zoneset_from_staged();
-	mutex_unlock(&fcsim_zone_mutex);
-	if (IS_ERR(staged))
+	if (IS_ERR(staged)) {
+		mutex_unlock(&fcsim_zone_mutex);
 		return PTR_ERR(staged);
-
+	}
 	mutex_lock(&fcsim_mutex);
 	pending = !fcsim_zoneset_equal(staged, fcsim_active_zs);
 	mutex_unlock(&fcsim_mutex);
+	mutex_unlock(&fcsim_zone_mutex);
 
 	fcsim_zoneset_free(staged);
 	return sysfs_emit(page, "%d\n", pending);
