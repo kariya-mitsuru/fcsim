@@ -24,11 +24,17 @@ AlmaLinux 9 向けには DKMS RPM も作れる（`make rpm` → `rpmbuild/RPMS/n
 AlmaLinux 9 のゲストに入れて確認する（ホストには入れない）。
 
 テストはいずれも virtme-ng のゲスト内で動く（`scripts/vng-run.sh`）。結果とゲストの dmesg は `.test-out/` に残る。
+各テストはゲスト内で `TEST_TIMEOUT` 秒（既定 300）で打ち切られ、そのときも dmesg は残る。
 
 ### 必要なもの
 
-共通: gcc、make、virtme-ng、qemu-kvm、targetcli（python3-rtslib）、sg3_utils、device-mapper-multipath、
-（RPM を作る場合）rpm-build、dkms
+x86_64 が前提（カーネルのビルドは `bzImage`、WSL2 は `config-wsl` を使う）。
+
+共通: gcc、make、git、virtme-ng、qemu-kvm（`/usr/libexec/qemu-kvm`。別の場所なら `QEMU=` で指定）、
+targetcli（python3-rtslib）、sg3_utils、lsscsi、device-mapper-multipath、（RPM を作る場合）rpm-build、dkms
+
+カーネルを自分で組む場合（開発用カーネル、WSL2 のカーネル）: flex、bison、bc、elfutils-libelf-devel、
+openssl-devel、dwarves など、カーネルのビルドに要るもの
 
 - AlmaLinux 9 のカーネル: そのリリースの `kernel-core`、`kernel-modules-core`、`kernel-modules`、`kernel-devel`、
   および virtme-ng が initramfs を作るための `busybox`（EPEL）。WSL の distro に入れるだけで、起動には影響しない

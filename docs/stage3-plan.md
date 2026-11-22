@@ -4,7 +4,10 @@
 `docs/design.md` の段階 3 には「ゾーニング、NPIV、fc_host 統計、rtslib upstream、initiator 側 CLI」を挙げていたが、
 これらは規模も性質もばらばらなので、価値・規模・依存関係を整理し、進める順序を提案する。
 
-## 1. 現状
+> **この文書は計画時点のもの。** 実施済みの節には「実施済み」「実施内容」として結果を書き足してあり、
+> 計画と違うところはそちらが正しい。現在の仕様は `docs/design.md` を参照。
+
+## 1. 現状（計画時点）
 
 - カーネルモジュール `tcm_fcsim`（約 2,900 行）。開発用カーネル 6.18 + virtme-ng でのみビルド・検証している
 - 設定手段: target 側は targetcli（ラッパー経由）、initiator 側・ファブリックは configfs を直接操作
@@ -79,7 +82,7 @@
     pending    (ro) 1: 編集中の構成が有効な構成と違う
     active     (ro) 有効な構成の一覧（mode と、ゾーンごとのメンバー）
   zones/<name>/
-    members    編集用。WWPN を 1 行 1 つ（書き込みで全置換）
+    members    編集用。WWPN を空白・改行・カンマ区切りで（書き込みで全置換。読むと 1 行 1 つ）
 ```
 
 - 編集（mkdir / rmdir / `members` / `mode` への書き込み）はファブリックに一切影響しない。
@@ -92,6 +95,7 @@
   ゾーン変更で外れた組はログアウトし（rport の dev_loss 開始）、入った組はログインする。
   実機のスイッチと同様、影響を受けたポートに RSCN を送る
 - テスト: 2 × 2 構成で、ゾーンの付け外しに応じて rport とパス数が変わること。multipathd のパス数の追従
+  （実施結果: `tests/zone-fcsim.sh` はログイン先と RSCN の宛先を確かめる。multipathd のパス数の追従のテストは未実装）
 
 ### D. NPIV
 
@@ -125,6 +129,7 @@
 - targetcli 連携は今のラッパー方式（`tools/fcsim-targetcli` / `fcsim-targetctl`）を続け、配布物に同梱する
 - configfs の配置や属性名は、使いながら見直してよい（変更したら `docs/design.md` と CLI を合わせて更新する）
 - 互換層（`fcsim_compat.h`）で複数のカーネルを一つのソースから支える
+  （実施結果: 互換層は不要だった。§3 F の spike の結果を参照）
 
 ### F. 配布・カーネル互換（追加候補）
 
@@ -139,6 +144,7 @@
   virtme-ng はディストリのカーネルも起動できるので、テストを同じ仕組みで回せる見込み
 - **RHEL 10 / Fedora / Ubuntu**: 6.12 以降なら差分は小さいはず
 - 配布形態: DKMS 対応の RPM（モジュールのソース、`tools/`、systemd unit）
+  （実施結果: systemd unit は見送った。起動時の復元は利用者が `fcsim-targetctl restore` と `fcsimctl restore` で行う）
 - 進め方の案: まず AlmaLinux 9 の kernel-devel でビルドを試し（短い spike）、差分の量を見てから範囲を決める
 
 **決定（§5 の 1）: 対象は WSL2 のカーネルと AlmaLinux 9。AlmaLinux 10 は今は対象外だが、妨げになる選択はしない。**
@@ -154,7 +160,7 @@
 
 - 互換は `src/fcsim_compat.h` に集め、カーネルのバージョンではなく「その API があるか」で切り替える
   （RHEL はバックポートが多く、バージョン番号では判断できないため。必要なら Kbuild で機能の有無を検出する）。
-  6.12 系の AlmaLinux 10 も、後から同じ仕組みで足せる
+  6.12 系の AlmaLinux 10 も、後から同じ仕組みで足せる（実施結果: 互換層は作らなかった。下記）
 **spike の結果（3a と並行で実施）**
 
 - AlmaLinux 9（kernel-devel 5.14.0-741.24.1.el9_9、`dnf download` + `rpm2cpio` で root 不要）:
@@ -200,7 +206,10 @@
 RHEL 9 の multipathd（0.8.7）の `marginal_pathgroups fpin` で、LI を受けたパスが別グループに移り、
 I/O がそのパスを避け、LINKUP で戻ることを確認した。NPIV（D）は libvirt での活用が限られるため後回しにした。
 
-段階 2 の障害注入の延長。障害ルールに「FPIN を送る」を加え、`fc_host_fpin_rcv()` に Link Integrity / Congestion の
+実装は計画と次の点で違う: FPIN は障害ルールの属性ではなく、独立した `fcsim/fpin` 属性への書き込みで送る。
+rport を Marginal にするのはカーネルではなく multipathd（`marginal_pathgroups fpin`）で、カーネルは FPIN の統計を数える。
+
+（計画時点の記述）段階 2 の障害注入の延長。障害ルールに「FPIN を送る」を加え、`fc_host_fpin_rcv()` に Link Integrity / Congestion の
 通知を渡す。対象の rport は Marginal 状態になり、FPIN の統計も増える。
 multipathd 側に `marginal_pathgroups`（RHEL 9 の 0.8.7 にもある）があるので、「壊れてはいないが品質の悪いパス」を
 避ける挙動を試せる。実機では再現しにくい状況なので、エミュレータならではの価値がある。

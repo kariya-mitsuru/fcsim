@@ -31,8 +31,10 @@ mkdir -p %{buildroot}%{_datadir}/%{name} %{buildroot}%{_bindir}
 install -m 0755 tools/fcsimctl tools/fcsim-targetcli %{buildroot}%{_datadir}/%{name}/
 install -m 0644 tools/fcsim_rtslib.py %{buildroot}%{_datadir}/%{name}/
 ln -s fcsim-targetcli %{buildroot}%{_datadir}/%{name}/fcsim-targetctl
-for t in fcsimctl fcsim-targetcli fcsim-targetctl; do
-	ln -s %{_datadir}/%{name}/$t %{buildroot}%{_bindir}/$t
+# Every tool in %{_datadir}/%{name} gets a link in %{_bindir} (fcsim*).
+for t in %{buildroot}%{_datadir}/%{name}/fcsim*; do
+	[ "${t%.py}" = "$t" ] || continue	# not the rtslib module
+	ln -s %{_datadir}/%{name}/${t##*/} %{buildroot}%{_bindir}/${t##*/}
 done
 
 %post
@@ -57,9 +59,7 @@ dkms remove -m %{name} -v %{version} --all --rpm_safe_upgrade || :
 
 %files
 %license LICENSE
-%doc README.md docs/design.md
+%doc README.md docs/design.md docs/stage3-plan.md
 /usr/src/%{name}-%{version}
 %{_datadir}/%{name}
-%{_bindir}/fcsimctl
-%{_bindir}/fcsim-targetcli
-%{_bindir}/fcsim-targetctl
+%{_bindir}/fcsim*

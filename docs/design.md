@@ -30,14 +30,14 @@ FC HBA なしで「FC ストレージ」をエミュレーションする Linux 
 | ファブリックの置き場所 | カーネル内には「仕組み」（ポート・port_id・ログイン/ログアウト・link 状態・既定の全対全接続）だけを置く。ゾーニング定義や障害シナリオ等の「ポリシー」は将来ユーザ空間ツールが configfs に書く |
 | ACL 無し initiator の扱い | tcm_qla2xxx と同じ既定値: `generate_node_acls=1`, `demo_mode_login_only=1`, `demo_mode_write_protect=1`, `cache_dynamic_acls=1`。= ログインは通り rport は見えるが、LUN は明示 ACL を持つ initiator にしか見えない。TPG attrib で変更可能 |
 | target 側の fc_host | 出さない（target 側のエミュレーションは目的外） |
-| WWN 表記 | configfs 上は小文字コロン区切り `xx:xx:xx:xx:xx:xx:xx:xx`（tcm_qla2xxx と同じ。rtslib の naa 形式と相互変換可能） |
+| WWN 表記 | configfs 上は小文字コロン区切り `xx:xx:xx:xx:xx:xx:xx:xx`（tcm_qla2xxx と同じ）。rtslib の naa 形式（`naa.` + 16 桁）と相互変換できるのは、先頭の hex 桁が 1, 2, 5, c-f のものだけ（rtslib の制約）。カーネルと `fcsimctl` は 0 以外の任意の 64 bit を受け付けるので、例えば `30:00:…` の initiator は作れるが、その ACL は targetcli では作れない（`fcsimctl host create` が警告する） |
 
 ## 3. オブジェクトモデル
 
 | オブジェクト | 実体 | 主な属性 |
 |---|---|---|
 | ファブリック | モジュール内に 1 つ | switch WWN（`fabric_name`）、Domain ID `0x01`、port_id = `0x01AA00`（AA = 1..254 を IDA で払い出し） |
-| iport | `Scsi_Host` + `fc_host` | WWPN（ディレクトリ名）、WWNN（既定は WWPN の先頭バイトを `0x20` にしたもの）、port_id、port_state、speed、link |
+| iport | `Scsi_Host` + `fc_host` | WWPN（ディレクトリ名）、WWNN（既定は WWPN の先頭バイトを `0x20` にしたもの。WWPN の先頭が既に `0x20` なら、WWPN と同じにならないよう bit 60 も反転する）、port_id、port_state、speed、link |
 | tport | LIO `se_wwn` + `tpgt_1`（1 つのみ） | WWPN（ディレクトリ名）、WWNN、port_id、online = TPG 登録済み かつ `enable=1` |
 | nexus | ログイン済み (iport, tport) の組 | initiator 側 `fc_rport`、target 側 `se_session` |
 
@@ -50,8 +50,9 @@ reconcile は「あるべき nexus 集合」と現状を突き合わせ、差分
 - あるべき nexus: iport が link up かつ削除中でない × tport が online、かつ LIO から close 要求されていない
 - target に拒否されたログイン（ACL 無し・demo mode 無効）は reconcile のたびに再試行するが、ログ（info）は
   結果が変わったときだけ出す。記録はログイン成功・tport の online 状態の変化・iport の link down で消える
-- configfs の store/mkdir/rmdir や TPG enable/drop からは reconcile 完了まで待つ（同期）。
-  ACL 作成・close_session など LIO のロックを持っている可能性がある経路からは起動のみ（非同期）
+- configfs の store/mkdir/rmdir（TPG attrib の store を含む）や TPG enable/drop からは reconcile 完了まで待つ（同期）。
+  ACL 作成・close_session など LIO のロックを持っている可能性がある経路からは起動のみ（非同期）。
+  そのため ACL を削除した直後は、古いセッションがまだ残っていることがある
 
 ログイン:
 1. `target_setup_session(tpg, ..., initiator=iport WWPN, private=nexus)`
@@ -110,7 +111,8 @@ LIO
 - 参照: SCSI 側（切り離しで落とす）と LIO 側（`release_cmd` で落とす）の 2 本。sc とのリンクは `cmd->lock` の下で扱う
 - `scsi_done` は RCU read 区間内で呼ぶ。EH はエクスチェンジが既に切り離されていた場合、
   `synchronize_rcu()` で実行中の `scsi_done` を待ってから sc をミッドレイヤへ返す（再発行との競合防止）
-- 遅延中のコマンドは iport の held リストとタイマーで保持し、終了時はタイマーを同期削除する
+- ファブリックが保持中（遅延・drop）のコマンドは `cmd->held` とタイマーで表す（`iport->fault_lock` でタイマーと排他）。
+  終了時はタイマーを同期削除する
 
 ### エラー処理（SCSI EH）
 
@@ -122,8 +124,9 @@ LIO
 | target reset | LIO は TARGET RESET TMF を拒否するため、target 配下の全 LUN に LUN RESET を送り、target のエクスチェンジを全て終了 |
 | host reset | HBA リセット: そのポートの全エクスチェンジを終了して常に SUCCESS。ログインは維持（直後に EH が送る TUR を通すため） |
 
-- いずれも先に `fc_block_scsi_eh`。FAST_IO_FAIL なら対象を `DID_TRANSPORT_FAILFAST` で終了して返す
-- TMR の応答待ちは `tmr_timeout` 秒（既定 10）で打ち切る。LIO の TMR は TAS 無しで abort されると
+- host reset 以外は先に `fc_block_scsi_eh`。FAST_IO_FAIL なら対象を `DID_TRANSPORT_FAILFAST` で終了して返す
+  （host reset は rport を持たないので呼ばない）
+- TMR の応答待ちは `tmr_timeout` 秒（既定 10、1〜3600）で打ち切る。LIO の TMR は TAS 無しで abort されると
   `queue_tm_rsp` の代わりに `aborted_task` が呼ばれ ACK 参照を LIO 自身が落とすため、
   応答あり / abort された / EH が諦めた、の 3 状態で ACK 参照の受け渡しを管理する
 - `terminate_rport_io`: fast_io_fail_tmo / dev_loss_tmo 満了時、その rport の全エクスチェンジを
@@ -179,7 +182,7 @@ targetcli 上では単一 TPG の fabric（qla2xxx と同じ）として `tpg1` 
     <initiator WWPN>/           mkdir で仮想 HBA ポート（Scsi_Host）が生える（link down）
       port_name, port_id, scsi_host, targets   (ro)
       node_name                 (rw, link down 中のみ変更可)
-      link                      (rw: up / down、作成直後は down)
+      link                      (rw: up / down（kstrtobool の 1/0/y/n も可）、作成直後は down)
       draining                  (ro) ログアウト済みで drain 中のセッション数
       faults/<target WWPN|any>/ 障害注入ルール（上記）
 ```
@@ -194,6 +197,8 @@ fc_host の統計（`/sys/class/fc_host/hostN/statistics/`）は iport ごとの
 `lip_count`（issue_lip）、`fcp_packet_aborts`（EH abort）、`dumped_frames`（障害注入で失ったフレーム）、
 `fc_xid_not_found`（終了済みのエクスチェンジに届いた応答）、`seconds_since_last_reset`。物理層のエラー類は 0。
 `reset_statistics` はその時点の値を基準として記録する。
+障害注入でも FCP_CMND は HBA を出ているので、`error` や `drop=cmd` のコマンドも要求数と `tx_frames` に数える。
+`drop=rsp` で失われた FCP_RSP は `dumped_frames` だけに数え、`rx_frames` には数えない。
 
 ### ゾーニング
 
@@ -203,15 +208,19 @@ fc_host の統計（`/sys/class/fc_host/hostN/statistics/`）は iport ごとの
 ```
 /sys/kernel/config/fcsim/
   zoning/
-    mode       off | on        編集用（commit で反映）。off は全対全
+    mode       off | on        編集用（commit で反映）。off は全対全（kstrtobool の 1/0/y/n も可）
     commit     (wo) 1 を書くと、編集中の構成（mode と zones/）をまとめて有効にする
     pending    (ro) 1: 編集中の構成が有効な構成と違う
     active     (ro, バイナリ属性で 1 ページを超えても読める) 有効な構成:
                  mode <off|on>
                  zone <name> <wwpn> <wwpn> ...
   zones/<name>/
-    members    編集用。WWPN を空白・改行・カンマ区切りで（1 回の write で全置換、最大 128）
+    members    編集用。WWPN を空白・改行・カンマ区切りで（1 回の write で全置換、最大 128。超えると E2BIG）。
+               読むと 1 行 1 つ
 ```
+
+- ゾーンは最大 1024（超える mkdir は ENOSPC）。ゾーン名は `active` の 1 語になるので、印字可能な ASCII で
+  空白とカンマを含まないもの（ディレクトリ名なので `/`・`.`・`..` も不可）
 
 - mode on のとき、initiator と target は同じゾーンに入っていればログインできる（「あるべき nexus」の条件に追加）
 - 編集はファブリックに影響しない。commit で不変なコピーを作って差し替え、reconcile を 1 回だけ走らせる
@@ -233,6 +242,10 @@ fc_host の統計（`/sys/class/fc_host/hostN/statistics/`）は iport ごとの
   cn <initiator wwpn> [event] [severity=warning|error] [period=ms]   その initiator 自身のリンクの輻輳
 ```
 
+- event の名前（最初のものが既定）。省略時の値は count=1、threshold=1000、period=1000、severity=warning
+  - li: link_failure, loss_of_sync, loss_of_signal, prim_seq_err, invalid_tx_word, invalid_crc, device_specific, unknown
+  - pn / cn: credit_stall, lost_credit, oversubscription, device_specific, clear
+  - dn: timeout, unable_to_route, device_specific, unknown
 - 宛先: target ポートについての通知は、link up でそのポートとゾーンを共有する全 initiator へ。
   initiator ポートについての通知は、そのポートだけへ
 - 実際の ELS FPIN と同じ形のペイロードを組み、`fc_host_fpin_rcv()` に渡す。FC transport が fc_host / rport の
@@ -262,6 +275,7 @@ fcsimctl clear
 ```
 
 WWPN は `10:00:...`、`naa.1000...`、`0x1000...`、`1000...` のいずれでもよい。
+`fcsimctl --help` に全サブコマンドと FPIN の event 名を載せている。
 
 `/sys/class/fc_host/hostN/issue_lip` に書くと、未ログインの組み合わせを再試行し、online の rport を再スキャンする
 （`fc_user_scan` と同じく host_lock の下で online のものだけ）。
@@ -270,9 +284,14 @@ WWPN は `10:00:...`、`naa.1000...`、`0x1000...`、`1000...` のいずれで�
 
 | 名前 | 既定 | 意味 |
 |---|---|---|
-| `tmr_timeout` | 10 | EH が TMR の応答を待つ秒数 |
+| `tmr_timeout` | 10 | EH が TMR の応答を待つ秒数（1〜3600。範囲外は ERANGE） |
 | `dbg_release_delay_ms` | 0 | テスト専用: 次の READ の解放を遅らせる（1 回限り） |
 | `dbg_close_delay_ms` | 0 | テスト専用: `close_session` の先頭で眠る |
+| `dbg_deliver_terminate` | N | テスト専用: 次の TEST UNIT READY を `target_init_cmd()` の直後に EH abort 相当（`DID_ABORT`）で終了する（1 回限り） |
+| `dbg_commit_delay_ms` | 0 | テスト専用: 次のゾーニングの commit で、スナップショットを取ってから有効にするまで眠る（1 回限り） |
+
+値が上限を超えたときのエラーは属性によって違う: 数値の範囲外は ERANGE（`tmr_timeout`、障害ルールの
+`delay_ms`・`probability`・`count`）、ゾーンの members は E2BIG、ゾーン数は ENOSPC。
 
 ### targetcli 連携
 
@@ -307,7 +326,7 @@ scripts/build-wsl-kernel.sh 実行中の WSL2 カーネルと同じソース・�
 scripts/wsl-try.sh          実機の WSL2 カーネルで確認を取りながら試す（読み込み → ramdisk の LUN への I/O）
 packaging/                  AlmaLinux 9 向け DKMS RPM の spec と dkms.conf（make rpm）
 build/<release>/            開発用以外のカーネル向けのビルド（make el9 / make wsl / make KVER=...）
-tests/            virtme-ng ゲスト内で実行するテスト（make test で全部）
+tests/            virtme-ng ゲスト内で実行するテスト（make test の対象は smoke〜fpin の 13 本）
   lib.sh, guest-setup.sh                     共通の関数、ゲストの準備（D-Bus など）
   fc-events.py                               FC transport の netlink イベントを表示する
   smoke-fcsim.sh, smoke-fcsim-targetcli.sh   基本動作、targetcli 連携
@@ -319,14 +338,24 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test で
   multipathd-fcsim.sh                        multipathd（ALUA・service-time）: rport の fast_io_fail_tmo /
                                              dev_loss_tmo 設定、パスの自動復帰、全パスダウン時のキューイング
                                              （要 device-mapper-multipath、カーネルに SCSI_DH_ALUA / DM_MULTIPATH_ST）
-  misc-fcsim.sh                              拒否ログの抑制、1 ページを超える一覧、TPG 属性
-  cli-fcsim.sh                               fcsimctl（作成・障害ルール・status・save/restore）と fc_host 統計
-  zone-fcsim.sh                              ゾーニング（ステージングと commit、RSCN の宛先、revert、save/restore）
+  misc-fcsim.sh                              拒否ログの抑制、1 ページを超える一覧（fcsimctl status の件数も）、
+                                             TPG 属性（store がログインを待つこと）、tmr_timeout の範囲、TPG 名の検証、
+                                             同じ WWPN の initiator / target の同時作成
+  cli-fcsim.sh                               fcsimctl（作成・障害ルール・status・save/restore・使い方の誤り・ゾーン名の検査）、
+                                             fcsimctl が持つカーネルの既定値・上限の写しとカーネルの一致、
+                                             fc_host 統計（障害注入時の数え方を含む）、link up 中の node_name の拒否
+  zone-fcsim.sh                              ゾーニング（ステージングと commit、RSCN の宛先、revert、save/restore、
+                                             1 ページを超える active、並行する commit、最大構成）
   fpin-fcsim.sh                              FPIN の宛先・統計・netlink、multipathd の marginal_pathgroups fpin
   wsl-try-guest.sh                           scripts/wsl-try.sh をゲストの WSL2 カーネルで実行（make test-wsl のみ）
   package-el9.sh                             DKMS RPM のインストール・利用・削除（make test-rpm）
   smoke-nvme-fcloop.sh, smoke-tcm-loop.sh    参考: nvme fcloop と tcm_loop の動作確認（make test には含めない）
 ```
+
+テストの出力とゲストの dmesg は `.test-out/<名前>[-<TEST_TAG>].{log,dmesg}` に残る。各テストはゲスト内で
+`TEST_TIMEOUT` 秒（既定 300）で打ち切り、その場合も dmesg を保存する。
+
+未実装のテスト: ゾーン変更で rport・パス数が変わったときの multipathd の追従（stage3-plan.md の 3b で予定していたもの）。
 
 ## 7. 段階
 
