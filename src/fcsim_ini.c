@@ -1050,6 +1050,12 @@ struct fcsim_iport *fcsim_iport_create(u64 wwpn)
 	ret = fcsim_port_id_alloc(&iport->port_id);
 	if (ret)
 		goto out_unlock;
+	/*
+	 * Take the WWPN now: setting up the Scsi_Host takes a while, and a
+	 * target port must not get the same WWPN meanwhile.  The fabric
+	 * does not see the port until it moves to fcsim_iports.
+	 */
+	list_add_tail(&iport->node, &fcsim_iports_creating);
 	mutex_unlock(&fcsim_mutex);
 
 	shost = scsi_host_alloc(&fcsim_sht, sizeof(struct fcsim_iport *));
@@ -1076,7 +1082,7 @@ struct fcsim_iport *fcsim_iport_create(u64 wwpn)
 	fcsim_fc_host_init(iport);
 
 	mutex_lock(&fcsim_mutex);
-	list_add_tail(&iport->node, &fcsim_iports);
+	list_move_tail(&iport->node, &fcsim_iports);
 	mutex_unlock(&fcsim_mutex);
 
 	pr_info("host%u: initiator port %s (port_id 0x%06x) created\n",
@@ -1090,6 +1096,7 @@ out_put:
 	scsi_host_put(shost);
 out_port_id:
 	mutex_lock(&fcsim_mutex);
+	list_del(&iport->node);
 	fcsim_port_id_free(iport->port_id);
 out_unlock:
 	mutex_unlock(&fcsim_mutex);

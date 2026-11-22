@@ -108,7 +108,7 @@ struct fcsim_stats {
 
 /* Initiator port: one virtual HBA port = one Scsi_Host. */
 struct fcsim_iport {
-	struct list_head	node;		/* fcsim_iports */
+	struct list_head	node;		/* fcsim_iports(_creating) */
 	struct config_group	group;		/* /sys/kernel/config/fcsim/hosts/<wwpn> */
 	struct config_group	faults_group;	/* .../hosts/<wwpn>/faults */
 	struct Scsi_Host	*shost;
@@ -214,6 +214,7 @@ struct fcsim_scmd {
 /* fcsim_main.c: fabric */
 extern struct mutex fcsim_mutex;
 extern struct list_head fcsim_iports;
+extern struct list_head fcsim_iports_creating;
 extern struct list_head fcsim_tports;
 extern u64 fcsim_fabric_wwn;
 extern struct device *fcsim_root_dev;

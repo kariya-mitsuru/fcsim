@@ -61,6 +61,27 @@ more=$(tail -1 $TPG/sessions | sed -n 's/^\.\.\. \([0-9]*\) more$/\1/p')
 echo "  ok: $((lines - 1)) listed + $more more = $N"
 for h in "$HOSTS"/*; do rmdir "$h"; done
 
+step "a WWPN is never both an initiator and a target port"
+# Create both at once: one of the two must be refused, however the
+# (slow) Scsi_Host setup of the initiator port interleaves.
+both=0
+for n in $(seq 40); do
+	W=10:00:00:00:c9:00:01:$(printf %02x $n)
+	mkdir "$HOSTS/$W" 2>/dev/null &
+	A=$!
+	mkdir "$LIO/fcsim/$W" 2>/dev/null &
+	B=$!
+	ini=0 tgt=0
+	wait $A && ini=1
+	wait $B && tgt=1
+	[ $ini$tgt = 11 ] && both=$((both + 1))
+	[ $ini$tgt != 00 ] || fail "$W: both refused"
+	[ -d "$HOSTS/$W" ] && rmdir "$HOSTS/$W"
+	[ -d "$LIO/fcsim/$W" ] && rmdir "$LIO/fcsim/$W"
+done
+echo "  40 tries, $both with both ports created"
+[ $both = 0 ] || fail "the same WWPN was created as initiator and target port"
+
 step "teardown"
 teardown_all
 splat_check

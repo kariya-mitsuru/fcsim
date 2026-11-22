@@ -27,6 +27,8 @@
 
 DEFINE_MUTEX(fcsim_mutex);
 LIST_HEAD(fcsim_iports);
+/* Initiator ports still being set up: their WWPNs are taken already. */
+LIST_HEAD(fcsim_iports_creating);
 LIST_HEAD(fcsim_tports);
 
 /* WWN of the (single) virtual switch, shown as fc_host fabric_name. */
@@ -123,6 +125,9 @@ bool fcsim_wwpn_in_use(u64 wwpn)
 	lockdep_assert_held(&fcsim_mutex);
 
 	list_for_each_entry(iport, &fcsim_iports, node)
+		if (iport->wwpn == wwpn)
+			return true;
+	list_for_each_entry(iport, &fcsim_iports_creating, node)
 		if (iport->wwpn == wwpn)
 			return true;
 	list_for_each_entry(tport, &fcsim_tports, node)
