@@ -148,6 +148,52 @@ nexus の検索は `rport->dd_data` を使わず、iport の nexus リストを�
 切り離し後に LIO が返す結果・データは捨てる。データは LIO 自身のバッファとの間でコピーする
 （SGL の pass-through はしない。切り離した後で LIO が initiator のページに触れないようにするため）。
 
+```mermaid
+%%{init: {"sequence": {"mirrorActors": false}}}%%
+sequenceDiagram
+  participant ML as SCSI ミッドレイヤ
+  participant IP as iport
+  participant FAB as ファブリック
+  participant LIO as LIO（tport / core）
+
+  ML->>IP: queuecommand(sc)
+  opt rport が blocked
+    IP-->>ML: DID_IMM_RETRY 等
+  end
+  IP->>FAB: 障害注入ルールの評価
+  alt error
+    FAB-->>ML: 即座にエラー
+  else drop=cmd / delay
+    Note over FAB: 保持
+  end
+  Note over IP: エクスチェンジ確保
+  FAB->>LIO: target_submit
+
+  opt WRITE
+    LIO->>IP: write_pending
+    alt sc が繋がっている
+      IP->>LIO: データをコピー、target_execute_cmd
+    else 切り離し済み
+      IP->>LIO: ABORT_CMD で失敗させる
+    end
+  end
+
+  LIO->>IP: queue_data_in / queue_status
+  Note over IP: 繋がっていれば sc にデータと結果を設定
+
+  LIO->>IP: release_cmd
+  alt 繋がっている
+    IP-->>ML: scsi_done
+  else drop=rsp
+    Note over FAB: 応答を捨てて保持
+  else 切り離し済み
+    Note over IP: 結果を捨てる
+  end
+```
+
+<details>
+<summary>テキスト版</summary>
+
 ```
 queuecommand(sc)
   fc_remote_port_chkready(rport)              … blocked なら DID_IMM_RETRY 等
@@ -161,6 +207,8 @@ LIO
   queue_status   → 同上（データ無し）
   release_cmd    → 繋がっていれば scsi_done（drop=rsp なら応答を捨ててファブリックで保持）
 ```
+
+</details>
 
 - 参照: SCSI 側（切り離しで落とす）と LIO 側（`release_cmd` で落とす）の 2 本。sc とのリンクは `cmd->lock` の下で扱う
 - `scsi_done` は RCU read 区間内で呼ぶ。EH はエクスチェンジが既に切り離されていた場合、
