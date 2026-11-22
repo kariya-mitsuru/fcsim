@@ -133,9 +133,7 @@ wait_for 10 rd || fail "read after link up"
 echo "  ok: rport $(cat $RP/port_state) again"
 
 step "RSCN and link events (netlink)"
-python3 "$TOP/tests/fc-events.py" 4 > /tmp/events &
-EV=$!
-sleep 0.5
+start_events 4 /tmp/events
 echo 0 > "$LIO/fcsim/$T2/tpgt_1/enable"
 echo 1 > "$LIO/fcsim/$T2/tpgt_1/enable"
 echo down > "$HOSTS/$I1/link"

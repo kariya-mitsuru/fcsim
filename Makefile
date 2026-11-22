@@ -77,6 +77,7 @@ test-el9: el9
 
 test-wsl: export KDIR = $(WSL_KDIR)
 test-wsl: export TEST_TAG = wsl
+test-wsl: TESTS += "wsl-try tests/wsl-try-guest.sh"	# needs the WSL2 kernel
 test-wsl: wsl
 	$(run-tests)
 

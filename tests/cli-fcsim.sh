@@ -12,7 +12,6 @@ T2=21:00:00:00:00:00:00:02
 I1=10:00:00:00:c9:00:00:01
 I2=10:00:00:00:c9:00:00:02
 
-hexval() { printf '%d' "$(cat "$1")"; }
 
 step "setup: targets via fcsim-targetcli"
 modprobe target_core_mod

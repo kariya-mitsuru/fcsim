@@ -19,6 +19,21 @@ wait_for() {	# wait_for <seconds> <command...>
 	done
 }
 
+# hexval <file>: a hex statistic as a decimal number.  A missing file is an
+# error: printf would turn the empty string into 0 and an "= 0" check pass.
+hexval() {
+	[ -r "$1" ] || fail "no such statistic: $1"
+	printf '%d' "$(cat "$1")"
+}
+
+# start_events <seconds> <file>: record FC netlink events into <file> in the
+# background (pid in EV); returns once the listener is bound.
+start_events() {
+	python3 "$TOP/tests/fc-events.py" "$1" > "$2" &
+	EV=$!
+	wait_for 10 grep -q '^listening' "$2" || fail "fc-events.py did not start"
+}
+
 splat_check() {
 	if dmesg | grep -E 'BUG:|WARNING:|KASAN|possible circular|INFO: task .* blocked|Call Trace'; then
 		fail "kernel splat detected"

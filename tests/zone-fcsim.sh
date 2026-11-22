@@ -17,11 +17,10 @@ expect() {	# expect <initiator> "<targets>"
 	[ "$(tgts $1)" = "$2" ] || fail "$1 logged in to [$(tgts $1)], expected [$2]"
 }
 events() {	# events <seconds> <command...>: FC netlink events during the command
-	python3 "$TOP/tests/fc-events.py" "$1" > /tmp/events & local ev=$!
-	sleep 0.5
+	start_events "$1" /tmp/events
 	shift
 	"$@"
-	wait $ev
+	wait $EV
 	grep -v '^listening' /tmp/events | sort || true
 }
 

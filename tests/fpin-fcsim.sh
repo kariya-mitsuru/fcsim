@@ -27,7 +27,6 @@ cleanup() {
 }
 trap cleanup EXIT
 
-hexval() { printf '%d' "$(cat "$1")"; }
 rport_of() {	# rport_of <hostN> <target wwpn> -> rport-X:Y-Z
 	local rp
 	for rp in /sys/class/scsi_host/$1/device/rport-*; do
@@ -55,8 +54,7 @@ udevadm settle
 
 # ---------------------------------------------------------------------------
 step "1. LI about T1: both initiators get it, the T1 rports count it"
-python3 "$TOP/tests/fc-events.py" 3 > /tmp/ev & EV=$!
-sleep 0.5
+start_events 3 /tmp/ev
 $CTL fpin li $T1 loss_of_sync count=5
 wait $EV
 grep LINK_FPIN /tmp/ev | sed 's/^/  /'
