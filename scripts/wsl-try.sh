@@ -48,6 +48,10 @@ esac
 [ "$(modinfo -F vermagic "$KO" | awk '{print $1}')" = "$REL" ] || die "$KO was built for another kernel"
 [ -d /sys/module/tcm_fcsim ] && die "tcm_fcsim is already loaded"
 [ -e /sys/kernel/config/target/fcsim ] && die "/sys/kernel/config/target/fcsim exists already"
+# The cleanup deletes the ramdisk by name: never let that be someone else's.
+for d in /sys/kernel/config/target/core/rd_mcp_*/"$RD"; do
+	[ -e "$d" ] && die "a ramdisk backstore named $RD exists already ($d)"
+done
 modprobe -n target_core_mod || die "target_core_mod is not available"
 
 cat <<EOF
@@ -60,7 +64,7 @@ confirm "Continue?" || exit 0
 
 # ------------------------------------------------------------------ cleanup
 
-LOADED=0 CREATED=0 AUTOSAVE=
+LOADED=0 CREATED=0 RD_CREATED=0 AUTOSAVE=
 # Only look at what happens from here on.  Counting lines would not do: once
 # the ring buffer is full, the line count hardly grows.
 MARK="wsl-try: start $$.$(date +%s%N)"
@@ -73,7 +77,7 @@ cleanup() {
 		say "cleanup"
 		[ -d "/sys/kernel/config/fcsim/hosts/$I" ] && "$CTL" host delete "$I"
 		[ -d "/sys/kernel/config/target/fcsim/$T" ] && "$TCLI" /fcsim delete "$(naa $T)" >/dev/null
-		"$TCLI" /backstores/ramdisk delete "$RD" >/dev/null 2>&1
+		[ $RD_CREATED = 1 ] && "$TCLI" /backstores/ramdisk delete "$RD" >/dev/null
 		rmdir /sys/kernel/config/target/fcsim 2>/dev/null
 	fi
 	if [ -n "$AUTOSAVE" ]; then
@@ -122,6 +126,7 @@ AUTOSAVE=$("$TCLI" get global auto_save_on_exit | sed -n 's/^auto_save_on_exit=/
 "$TCLI" set global auto_save_on_exit=false >/dev/null
 CREATED=1
 "$TCLI" /backstores/ramdisk create "$RD" 64M >/dev/null
+RD_CREATED=1			# only now is it ours to delete
 "$TCLI" /fcsim create "$(naa $T)" >/dev/null
 "$TCLI" "/fcsim/$(naa $T)/luns" create "/backstores/ramdisk/$RD" >/dev/null
 "$TCLI" "/fcsim/$(naa $T)/acls" create "$(naa $I)" >/dev/null
