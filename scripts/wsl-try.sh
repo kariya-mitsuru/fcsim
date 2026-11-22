@@ -11,8 +11,9 @@
 #   2. a ramdisk LUN behind one target port, one initiator port, data written
 #      and read back, link down / up
 #
-# Everything this script creates is removed again, also on failure; other
-# LIO configuration is left alone.  The disk used for I/O is found through
+# Everything this script creates is removed again, also on failure (only the
+# kernel log of a failed run is kept); other LIO configuration is left alone
+# and targetcli's saved configuration is not touched.  The disk used for I/O is found through
 # the fcsim HBA in sysfs and checked to be the script's own ramdisk.
 set -euo pipefail
 
@@ -64,7 +65,7 @@ confirm "Continue?" || exit 0
 
 # ------------------------------------------------------------------ cleanup
 
-LOADED=0 CREATED=0 RD_CREATED=0 AUTOSAVE=
+LOADED=0 CREATED=0 RD_CREATED=0 STOPPED=0
 # Only look at what happens from here on.  Counting lines would not do: once
 # the ring buffer is full, the line count hardly grows.
 MARK="wsl-try: start $$.$(date +%s%N)"
@@ -80,28 +81,34 @@ cleanup() {
 		[ $RD_CREATED = 1 ] && "$TCLI" /backstores/ramdisk delete "$RD" >/dev/null
 		rmdir /sys/kernel/config/target/fcsim 2>/dev/null
 	fi
-	if [ -n "$AUTOSAVE" ]; then
-		"$TCLI" set global auto_save_on_exit="$AUTOSAVE" >/dev/null
-	fi
 	if [ $LOADED = 1 ]; then
 		rmmod tcm_fcsim && echo "tcm_fcsim unloaded"
 	fi
 	echo
-	dmesg | awk -v m="$MARK" 'seen || index($0, m) { seen = 1; print }' > /tmp/wsl-try.dmesg
-	if [ ! -s /tmp/wsl-try.dmesg ]; then
+	rm -f "$WORK/pattern" "$WORK/readback"
+	dmesg | awk -v m="$MARK" 'seen || index($0, m) { seen = 1; print }' > "$WORK/dmesg"
+	if [ ! -s "$WORK/dmesg" ]; then
 		echo "wsl-try: the start marker is gone from the kernel log (ring buffer" \
 			"wrapped); look for warnings yourself (journalctl -k)" >&2
 		rc=1
 	fi
-	grep -E 'tcm_fcsim|BUG:|WARNING:|Call Trace' /tmp/wsl-try.dmesg | tail -15
-	if grep -E 'BUG:|WARNING:|Call Trace' /tmp/wsl-try.dmesg >/dev/null; then
+	grep -E 'tcm_fcsim|BUG:|WARNING:|Call Trace' "$WORK/dmesg" | tail -15
+	if grep -E 'BUG:|WARNING:|Call Trace' "$WORK/dmesg" >/dev/null; then
 		echo "wsl-try: kernel warnings in dmesg, see above" >&2
 		rc=1
 	fi
-	[ $rc = 0 ] && echo "wsl-try: OK" || echo "wsl-try: FAILED ($rc)" >&2
+	if [ $rc != 0 ]; then
+		echo "wsl-try: FAILED ($rc); kernel log of this run: $WORK/dmesg" >&2
+	else
+		rm -rf "$WORK"
+		[ $STOPPED = 1 ] && echo "wsl-try: stopped as asked; no problems so far" ||
+			echo "wsl-try: OK"
+	fi
 	exit $rc
 }
+WORK=$(mktemp -d /tmp/wsl-try.XXXXXX)	# data files and the kernel log of this run
 trap cleanup EXIT
+stop() { STOPPED=1; exit 0; }	# the user declined a step
 
 # ------------------------------------------------------------------ step 1
 
@@ -114,16 +121,16 @@ rmmod tcm_fcsim
 LOADED=0
 echo "unloaded"
 
-confirm "Step 2: a 64 MiB ramdisk LUN, I/O to it, link down / up. Continue?" || exit 0
+confirm "Step 2: a 64 MiB ramdisk LUN, I/O to it, link down / up. Continue?" || stop
 
 # ------------------------------------------------------------------ step 2
 
 say "step 2: target port $T, initiator port $I"
 insmod "$KO"
 LOADED=1
-# targetcli would save the configuration (with fcsim in it) when it exits.
-AUTOSAVE=$("$TCLI" get global auto_save_on_exit | sed -n 's/^auto_save_on_exit=//p')
-"$TCLI" set global auto_save_on_exit=false >/dev/null
+# One-shot targetcli commands never save the configuration (auto_save_on_exit
+# only applies when the interactive shell exits), so fcsim never ends up in
+# the saved LIO configuration.
 CREATED=1
 "$TCLI" /backstores/ramdisk create "$RD" 64M >/dev/null
 RD_CREATED=1			# only now is it ours to delete
@@ -152,11 +159,11 @@ done
 
 echo
 echo "I/O device: $DISK ($HOST, LIO-ORG $RD, $(($(blockdev --getsz $DISK) / 2048)) MiB)"
-confirm "Write 16 MiB of random data to $DISK and read it back?" || exit 0
+confirm "Write 16 MiB of random data to $DISK and read it back?" || stop
 
 say "data"
-PAT=$(mktemp)
-RDBK=$(mktemp)
+PAT=$WORK/pattern
+RDBK=$WORK/readback
 head -c $((16 << 20)) /dev/urandom > "$PAT"
 dd if="$PAT" of="$DISK" bs=1M oflag=direct status=none
 dd if="$DISK" of="$RDBK" bs=1M count=16 iflag=direct status=none
@@ -176,4 +183,3 @@ dd if="$DISK" of="$RDBK" bs=1M count=16 iflag=direct status=none
 cmp "$PAT" "$RDBK" || die "data mismatch after link up"
 echo "read back after link down / up: identical"
 "$CTL" stats "$I" | grep -E '^(fcp_(input|output)_megabytes|link_failure_count) '
-rm -f "$PAT" "$RDBK"
