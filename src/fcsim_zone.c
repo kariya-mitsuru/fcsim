@@ -22,6 +22,8 @@
 #define pr_fmt(fmt) "tcm_fcsim: " fmt
 
 #include <linux/slab.h>
+#include <linux/limits.h>
+#include <linux/mm.h>
 #include <linux/delay.h>
 #include <linux/moduleparam.h>
 #include <linux/string.h>
@@ -35,7 +37,15 @@
 
 #define FCSIM_ZONE_MAX_MEMBERS	128	/* also keeps "members" within a page */
 #define FCSIM_ZONE_MAX_ZONES	1024
-#define FCSIM_ZONE_ACTIVE_MAX	(1024 * 1024)
+/*
+ * Longest text of zoning/active: every zone full, with the longest name a
+ * directory can have.  About 3.3 MiB; configfs only allocates what a read
+ * actually needs.
+ */
+#define FCSIM_ZONE_ACTIVE_MAX						\
+	(sizeof("mode off\n") - 1 + FCSIM_ZONE_MAX_ZONES *		\
+	 (sizeof("zone \n") - 1 + NAME_MAX +				\
+	  FCSIM_ZONE_MAX_MEMBERS * (1 + FCSIM_WWN_STRLEN)))
 
 /* A staged zone: /sys/kernel/config/fcsim/zones/<name>. */
 struct fcsim_zone {
@@ -504,7 +514,7 @@ static ssize_t fcsim_zoning_active_read(struct config_item *item, void *buf,
 		mutex_unlock(&fcsim_mutex);
 		return len;
 	}
-	text = kmalloc(len + 1, GFP_KERNEL);
+	text = kvmalloc(len + 1, GFP_KERNEL);	/* up to FCSIM_ZONE_ACTIVE_MAX */
 	if (!text) {
 		mutex_unlock(&fcsim_mutex);
 		return -ENOMEM;
@@ -519,7 +529,7 @@ static ssize_t fcsim_zoning_active_read(struct config_item *item, void *buf,
 	}
 	memcpy(buf, text, len);
 	memset(buf + len, '\n', size - len);
-	kfree(text);
+	kvfree(text);
 	return size;
 }
 

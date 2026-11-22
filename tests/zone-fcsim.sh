@@ -141,6 +141,32 @@ grep '^mode' $Z/active | sed 's/^/  active: /'
 grep -q '^mode off$' $Z/active || fail "the slow commit replaced the newer configuration"
 [ "$(cat $Z/pending)" = 0 ] || fail "pending after both commits"
 
+step "the largest possible configuration (well over 1 MiB) can be read back"
+ZS=/sys/kernel/config/fcsim/zones
+for d in $ZS/*; do rmdir "$d"; done
+echo off > $Z/mode	# nothing below changes who sees whom
+members=$(for m in $(seq 128); do printf '30:00:00:00:00:00:%02x:%02x ' $((m / 256)) $((m % 256)); done)
+pad=$(printf '%0255d' 0)
+for i in $(seq 1024); do
+	name=$(printf 'z%04d' $i)$pad
+	name=${name:0:255}	# NAME_MAX
+	mkdir "$ZS/$name"
+	echo "$members" > "$ZS/$name/members"
+done
+if mkdir "$ZS/one-too-many" 2>/dev/null; then fail "zone 1025 accepted"; fi
+$CTL zone commit
+bytes=$(wc -c < $Z/active); zones=$(grep -c '^zone ' $Z/active)
+expected=$(( 9 + 1024 * (5 + 255 + 128 * 24 + 1) ))
+echo "  active: $bytes bytes (worst case $expected), $zones zones"
+[ "$bytes" = "$expected" ] && [ "$zones" = 1024 ] || fail "active wrong or truncated"
+$CTL zone revert || fail "zone revert"
+[ "$(cat $Z/pending)" = 0 ] || fail "pending after revert"
+$CTL save /tmp/zbig.json || fail "save"
+python3 -c 'import json,sys; z=json.load(open(sys.argv[1]))["zoning"]["zones"]; assert len(z) == 1024 and all(len(m) == 128 for m in z.values())' /tmp/zbig.json ||
+	fail "saved zoning incomplete"
+for d in $ZS/*; do rmdir "$d"; done
+$CTL zone commit
+
 step "teardown"
 $CTL clear
 teardown_all
