@@ -49,6 +49,14 @@ LIO_FABRIC = "/sys/kernel/config/target/fcsim"
 FAULT_ATTRS = ("delay_ms", "drop", "error", "probability", "count")
 FAULT_DEFAULTS = {"delay_ms": "0", "drop": "none", "error": "none",
                   "probability": "100", "count": "-1"}
+FAULT_CHOICES = {"drop": ("none", "cmd", "rsp"),
+                 "error": ("none", "transport", "busy", "qfull", "medium", "aborted")}
+FAULT_RANGES = {"delay_ms": (0, 3600 * 1000), "probability": (0, 100),
+                "count": (-1, 2**31 - 1)}
+# Written while the rule is held off with count=0 (see fault_set).
+FAULT_GATED = ("probability", "delay_ms", "drop", "error")
+ZONE_MAX_MEMBERS = 128
+ZONE_MAX_ZONES = 1024
 SAVE_VERSION = 1
 
 
@@ -279,14 +287,63 @@ def cmd_lip(args):
     write("/sys/class/fc_host/%s/issue_lip" % shost, "1")
 
 
-def fault_set(hdir, target, attrs):
-    fd = os.path.join(hdir, "faults", target)
-    if not os.path.isdir(fd):
-        os.mkdir(fd)
+def fault_check(attrs):
+    """Validate and normalize fault attributes the way the kernel would."""
+    out = {}
     for k, v in attrs.items():
         if k not in FAULT_ATTRS:
             raise Error("unknown fault attribute: %s (one of %s)" % (k, ", ".join(FAULT_ATTRS)))
-        write(os.path.join(fd, k), v)
+        v = str(v).strip()
+        if k in FAULT_CHOICES:
+            if v not in FAULT_CHOICES[k]:
+                raise Error("fault %s: one of %s, not %r" % (k, "|".join(FAULT_CHOICES[k]), v))
+        else:
+            try:
+                n = int(v, 0)
+            except ValueError:
+                raise Error("fault %s: not a number: %r" % (k, v))
+            lo, hi = FAULT_RANGES[k]
+            if not lo <= n <= hi:
+                raise Error("fault %s: %d is out of range %d..%d" % (k, n, lo, hi))
+            v = str(n)
+        out[k] = v
+    return out
+
+
+def fault_set(hdir, target, attrs):
+    """Create or update a fault rule so that I/O never sees a mix of old and
+    new attributes: count=0 stops the rule from injecting while the others
+    are written, and the final count goes in last."""
+    attrs = fault_check(attrs)
+    fd = os.path.join(hdir, "faults", target)
+    created = not os.path.isdir(fd)
+    if created:
+        try:
+            os.mkdir(fd)
+        except OSError as e:
+            raise Error("mkdir %s: %s" % (fd, e.strerror))
+        old = dict(FAULT_DEFAULTS)
+    else:
+        old = {k: read(os.path.join(fd, k)) for k in FAULT_ATTRS}
+    try:
+        write(os.path.join(fd, "count"), "0")
+        for k in FAULT_GATED:
+            if k in attrs:
+                write(os.path.join(fd, k), attrs[k])
+        write(os.path.join(fd, "count"), attrs.get("count", old["count"]))
+    except (Error, OSError):
+        if created:
+            try:
+                os.rmdir(fd)
+            except OSError:
+                pass
+        else:
+            for k in FAULT_GATED + ("count",):
+                try:
+                    write(os.path.join(fd, k), old[k])
+                except Error:
+                    pass
+        raise
 
 
 def cmd_fault(args):
@@ -496,26 +553,118 @@ def cmd_clear(args):
     clear_all()
 
 
-def cmd_restore(args):
-    check_loaded()
-    with open(args.file) as f:
-        cfg = json.load(f)
+def zone_name_check(name):
+    # The kernel takes one printable word without ',' (fcsim_zones_make_group);
+    # '/', '.' and '..' cannot be directory names.
+    if (not isinstance(name, str) or not re.fullmatch(r"[!-~]+", name)
+            or "," in name or "/" in name or name in (".", "..")):
+        raise Error("invalid zone name: %r" % (name,))
+    return name
+
+
+def restore_plan(cfg):
+    """Validate a saved configuration and return it normalized, without
+    touching the fabric."""
+    def expect(what, value, typ):
+        if not isinstance(value, typ):
+            raise Error("%s: expected %s, got %r" % (what, typ.__name__, value))
+        return value
+
+    expect("config", cfg, dict)
     if cfg.get("version") != SAVE_VERSION:
         raise Error("unsupported config version: %r" % cfg.get("version"))
-    clear_all()
+
+    z = expect("zoning", cfg.get("zoning", {}), dict)
+    mode = z.get("mode", "off")
+    if mode not in ("on", "off"):
+        raise Error("zoning mode: on|off, not %r" % (mode,))
+    zones = {}
+    for name, members in expect("zoning.zones", z.get("zones", {}), dict).items():
+        zone_name_check(name)
+        expect("zone %s" % name, members, list)
+        ms = []
+        for m in members:
+            m = wwn(expect("zone %s member" % name, m, str))
+            if m not in ms:
+                ms.append(m)
+        if len(ms) > ZONE_MAX_MEMBERS:
+            raise Error("zone %s: more than %d members" % (name, ZONE_MAX_MEMBERS))
+        zones[name] = ms
+    if len(zones) > ZONE_MAX_ZONES:
+        raise Error("more than %d zones" % ZONE_MAX_ZONES)
+
+    tports = set()
+    for p in glob.glob(LIO_FABRIC + "/*"):
+        try:
+            tports.add(wwn(os.path.basename(p)))
+        except Error:
+            pass		# discovery_auth and the like
+    hosts, seen = [], set()
+    for h in expect("hosts", cfg.get("hosts", []), list):
+        expect("host", h, dict)
+        w = wwn(expect("host wwpn", h.get("wwpn"), str))
+        if w in seen:
+            raise Error("host %s: listed twice" % w)
+        if w in tports:
+            raise Error("host %s: WWPN is in use by a target port" % w)
+        seen.add(w)
+        wwnn = h.get("wwnn")
+        wwnn = wwn(expect("host %s wwnn" % w, wwnn, str)) if wwnn else None
+        link = h.get("link", "up")
+        if link not in ("up", "down"):
+            raise Error("host %s: link up|down, not %r" % (w, link))
+        faults, targets = [], set()
+        for f in expect("host %s faults" % w, h.get("faults", []), list):
+            expect("host %s fault" % w, f, dict)
+            t = rule_name(expect("host %s fault target" % w, f.get("target"), str))
+            if t in targets:
+                raise Error("host %s: two fault rules for %s" % (w, t))
+            targets.add(t)
+            faults.append((t, fault_check({k: f[k] for k in FAULT_ATTRS if k in f})))
+        hosts.append({"wwpn": w, "wwnn": wwnn, "link": link, "faults": faults})
+    return {"mode": mode, "zones": zones, "hosts": hosts}
+
+
+def restore_apply(plan):
     # Zoning first, so that the hosts log in under it from the start.
-    z = cfg.get("zoning", {})
-    zones_replace_staged(z.get("mode", "off"), z.get("zones", {}))
+    zones_replace_staged(plan["mode"], plan["zones"])
     zone_commit()
-    for h in cfg.get("hosts", []):
-        w = wwn(h["wwpn"])
+    for h in plan["hosts"]:
         # A new host logs in right away; take the link down while the fault
         # rules go in, so that I/O after the restore sees all of them.
-        d = host_create(w, wwn(h["wwnn"]) if h.get("wwnn") else None, "down")
-        for f in h.get("faults", []):
-            fault_set(d, rule_name(f["target"]),
-                      {k: f[k] for k in FAULT_ATTRS if k in f})
-        write(d + "/link", h.get("link", "up"))
+        d = host_create(h["wwpn"], h["wwnn"], "down")
+        for t, attrs in h["faults"]:
+            fault_set(d, t, attrs)
+        write(d + "/link", h["link"])
+
+
+def cmd_restore(args):
+    check_loaded()
+    try:
+        with open(args.file) as f:
+            cfg = json.load(f)
+    except OSError as e:
+        raise Error("%s: %s" % (args.file, e.strerror))
+    except ValueError as e:
+        raise Error("%s: not valid JSON: %s" % (args.file, e))
+    plan = restore_plan(cfg)
+
+    # Nothing has changed so far.  From here on a failure (the kernel refusing
+    # something) leaves the fabric half restored, so keep what was there.
+    backup = saved_config()
+    clear_all()
+    try:
+        restore_apply(plan)
+    except (Error, OSError) as e:
+        bak = args.file + ".before-restore"
+        try:
+            with open(bak, "w") as f:
+                json.dump(backup, f, indent=2)
+                f.write("\n")
+            hint = "the previous configuration is in %s (fcsimctl restore %s)" % (bak, bak)
+        except OSError:
+            hint = "previous configuration:\n" + json.dumps(backup, indent=2)
+        raise Error("restore failed part way: %s\n%s" % (e, hint))
 
 
 # ------------------------------------------------------------------ main

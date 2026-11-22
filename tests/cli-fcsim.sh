@@ -90,6 +90,44 @@ cat /tmp/err
 if $CTL host create 12:34 2>/tmp/err; then fail "bad WWPN accepted"; fi
 cat /tmp/err
 
+step "fault set is all or nothing"
+R=$HOSTS/$I1/faults/$T1
+$CTL fault clear $I1 $T1
+if $CTL fault set $I1 $T1 drop=cmd probability=abc 2>/tmp/err; then fail "bad probability accepted"; fi
+cat /tmp/err
+[ ! -e $R ] || fail "failed fault set left a rule"
+if $CTL fault set $I1 $T1 bogus=1 2>/tmp/err; then fail "bogus attribute accepted"; fi
+[ ! -e $R ] || fail "unknown attribute left an empty rule"
+# Updating a rule keeps the attributes not given, count included.
+$CTL fault set $I1 $T1 drop=cmd count=0
+$CTL fault set $I1 $T1 count=3 probability=40
+$CTL fault set $I1 $T1 drop=rsp
+[ "$(cat $R/drop) $(cat $R/count) $(cat $R/probability)" = "rsp 3 40" ] ||
+	fail "rule update: $(cat $R/drop) $(cat $R/count) $(cat $R/probability)"
+if $CTL fault set $I1 $T1 drop=none count=-2 2>/tmp/err; then fail "count=-2 accepted"; fi
+[ "$(cat $R/drop) $(cat $R/count)" = "rsp 3" ] || fail "rejected update changed the rule"
+$CTL fault clear $I1 $T1
+
+step "restore rejects a bad file without touching the fabric"
+$CTL save /tmp/fcsim-before.json
+bad_restore() {	# <description> <python expression editing c>
+	python3 -I -c 'import json,sys; c=json.load(open(sys.argv[1])); exec(sys.argv[2]); json.dump(c, open(sys.argv[3], "w"))' \
+		/tmp/fcsim-before.json "$2" /tmp/fcsim-bad.json
+	if $CTL restore /tmp/fcsim-bad.json 2>/tmp/err; then fail "restore accepted $1"; fi
+	echo "  $1: $(cat /tmp/err)"
+	$CTL save /tmp/fcsim-after.json
+	diff -u /tmp/fcsim-before.json /tmp/fcsim-after.json || fail "restore of $1 changed the fabric"
+}
+bad_restore "a bad member WWPN" 'c["zoning"]["zones"]["zbad"] = ["12:34"]'
+bad_restore "a bad host WWPN" 'c["hosts"].append({"wwpn": "10:00"})'
+bad_restore "a target port WWPN" 'c["hosts"].append({"wwpn": "'$T2'"})'
+bad_restore "a bad fault value" 'c["hosts"][0]["faults"].append({"target": "22:00:00:00:00:00:00:09", "probability": "abc"})'
+echo '{"version": 1, "hosts": [' > /tmp/fcsim-bad.json
+if $CTL restore /tmp/fcsim-bad.json 2>/tmp/err; then fail "truncated JSON accepted"; fi
+cat /tmp/err
+$CTL save /tmp/fcsim-after.json
+diff -u /tmp/fcsim-before.json /tmp/fcsim-after.json || fail "truncated JSON changed the fabric"
+
 step "teardown"
 $CTL clear
 teardown_all

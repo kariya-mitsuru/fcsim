@@ -253,7 +253,7 @@ fcsimctl zone list | create <name> [wwpn...] | delete <name> | add|remove <name>
 fcsimctl zone mode on|off | commit | revert
 fcsimctl fpin li|pn|dn|cn <wwpn> [event] [key=value...]
 fcsimctl save|restore <file.json>           ゾーニング（編集中の構成）・host・link・障害ルール
-                                            （target 側は fcsim-targetctl で別に。restore は最後に commit）
+                                            （target 側は fcsim-targetctl で別に。restore は入力を検証してから現在の構成を消し、ゾーニングを先に commit してから host を作る）
 fcsimctl clear
 ```
 
