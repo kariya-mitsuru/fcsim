@@ -459,6 +459,32 @@ void fcsim_xchg_released(struct fcsim_cmd *cmd)
 /* ------------------------------------------------------------- I/O path */
 
 /*
+ * Test-only knob for a race window too narrow to hit from user space
+ * (tests/race-fcsim.sh deliver): the next TEST UNIT READY is terminated, as
+ * by an EH abort, right after target_init_cmd().  Off by default.
+ */
+static bool dbg_deliver_terminate;
+module_param(dbg_deliver_terminate, bool, 0644);
+MODULE_PARM_DESC(dbg_deliver_terminate,
+		 "test only: terminate the next TEST UNIT READY while it is handed to LIO (one-shot)");
+
+static void fcsim_dbg_deliver_terminate(struct fcsim_cmd *cmd)
+{
+	unsigned long flags;
+
+	if (likely(!READ_ONCE(dbg_deliver_terminate)) ||
+	    cmd->cdb[0] != TEST_UNIT_READY ||
+	    !xchg(&dbg_deliver_terminate, false))
+		return;
+	pr_info("dbg: terminating TEST UNIT READY during delivery\n");
+	spin_lock_irqsave(&cmd->lock, flags);
+	if (cmd->sc)
+		fcsim_xchg_finish(cmd, flags, DID_ABORT);
+	else
+		spin_unlock_irqrestore(&cmd->lock, flags);
+}
+
+/*
  * Hand an exchange to LIO.  Any context.  The caller holds a reference of
  * its own: the exchange may be terminated (and the SCSI side's reference
  * dropped) concurrently.
@@ -482,6 +508,9 @@ static void fcsim_deliver(struct fcsim_cmd *cmd)
 				      cmd->dir, 0);
 	rcu_read_unlock();
 
+	if (!ret)
+		fcsim_dbg_deliver_terminate(cmd);
+
 	spin_lock_irqsave(&cmd->lock, flags);
 	if (ret) {
 		/* Logout in progress; let the SCSI layer retry. */
@@ -491,8 +520,25 @@ static void fcsim_deliver(struct fcsim_cmd *cmd)
 			spin_unlock_irqrestore(&cmd->lock, flags);
 		return;
 	}
+	kref_get(&cmd->kref);		/* LIO's reference, dropped in release_cmd */
+	if (!cmd->sc) {
+		/*
+		 * Terminated while target_init_cmd() ran: the command never
+		 * reaches the target.  In practice this is EH (abort, host
+		 * reset) against a command the delay timer is delivering; a
+		 * logout first quiesces the queue (fc_remote_port_delete),
+		 * which waits for queuecommand and, through an RCU grace
+		 * period, for the timer softirq.
+		 * Before target_submit_prep() there is no LUN yet, so drop the
+		 * se_cmd the way LIO itself does there: the last session
+		 * command reference calls release_cmd, which drops LIO's
+		 * exchange reference.
+		 */
+		spin_unlock_irqrestore(&cmd->lock, flags);
+		target_put_sess_cmd(se_cmd);
+		return;
+	}
 	cmd->lio = true;
-	kref_get(&cmd->kref);		/* LIO's reference */
 	spin_unlock_irqrestore(&cmd->lock, flags);
 
 	/*

@@ -8,16 +8,19 @@
 #                         by the late completion.  Same for a LUN reset.
 #   race-fcsim.sh close   LIO close_session (ACL removal) racing with a
 #                         fabric logout (link down)
+#   race-fcsim.sh deliver EH (a host reset) terminating a delayed command
+#                         between target_init_cmd() and the hand-over to
+#                         LIO: the command must never reach the target
 #
-# Both use the test-only module parameters dbg_release_delay_ms /
-# dbg_close_delay_ms to widen the windows.  Run each scenario in its own
+# They use the test-only module parameters dbg_release_delay_ms /
+# dbg_close_delay_ms / dbg_deliver_delay_ms to widen the windows.  Run each scenario in its own
 # guest: a regression may crash the kernel.
 set -euo pipefail
 
 TOP=$(cd "$(dirname "$0")/.." && pwd)
 . "$TOP/tests/guest-setup.sh"
 
-SCENARIO=${1:?usage: $0 abort|close}
+SCENARIO=${1:?usage: $0 abort|close|deliver}
 TWWPN=21:00:00:00:00:00:00:01
 IWWPN=10:00:00:00:c9:00:00:01
 LIO=/sys/kernel/config/target
@@ -118,6 +121,29 @@ close)
 	echo up > "$HOSTS/$IWWPN/link"
 	[ "$(cat "$TPG/sessions")" = "$IWWPN" ] || fail "no relogin after link up"
 	echo "OK: sessions after link up: $(cat "$TPG/sessions")"
+	;;
+deliver)
+	step "deliver: exchange terminated between target_init_cmd and the hand-over to LIO"
+	STAT=$TPG/lun/lun_0/statistics/scsi_tgt_port/in_cmds
+	udevadm settle
+	before=$(cat "$STAT")
+	echo 1 > "$PARAM/dbg_deliver_terminate"	# one-shot, TEST UNIT READY only
+	# SG_IO does not retry: the terminated command is not sent again.
+	# Read-only open: closing a writable one makes udev probe the disk.
+	if sg_raw -R "$DISK" 00 00 00 00 00 00 >/tmp/turs.out 2>&1; then
+		cat /tmp/turs.out
+		fail "the terminated TEST UNIT READY succeeded"
+	fi
+	sed 's/^/  sg_raw: /' /tmp/turs.out
+	dmesg | grep -q 'dbg: terminating TEST UNIT READY' || fail "the knob did not fire"
+	udevadm settle
+	after=$(cat "$STAT")
+	echo "target port in_cmds: before $before, after $after"
+	[ "$after" = "$before" ] || fail "a terminated command reached the target"
+	dd if="$DISK" of=/dev/null bs=1M count=4 iflag=direct status=none || fail "I/O afterwards"
+	# A leaked session command reference would hang the drain at teardown.
+	splat_check
+	echo "OK: the terminated command was dropped before LIO"
 	;;
 *)
 	fail "unknown scenario $SCENARIO"
