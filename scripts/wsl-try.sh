@@ -61,7 +61,10 @@ confirm "Continue?" || exit 0
 # ------------------------------------------------------------------ cleanup
 
 LOADED=0 CREATED=0 AUTOSAVE=
-DMESG_START=$(dmesg | wc -l)	# only look at what happens from here on
+# Only look at what happens from here on.  Counting lines would not do: once
+# the ring buffer is full, the line count hardly grows.
+MARK="wsl-try: start $$.$(date +%s%N)"
+echo "$MARK" > /dev/kmsg
 cleanup() {
 	local rc=$?
 	trap - EXIT
@@ -80,7 +83,12 @@ cleanup() {
 		rmmod tcm_fcsim && echo "tcm_fcsim unloaded"
 	fi
 	echo
-	dmesg | tail -n +$((DMESG_START + 1)) > /tmp/wsl-try.dmesg
+	dmesg | awk -v m="$MARK" 'seen || index($0, m) { seen = 1; print }' > /tmp/wsl-try.dmesg
+	if [ ! -s /tmp/wsl-try.dmesg ]; then
+		echo "wsl-try: the start marker is gone from the kernel log (ring buffer" \
+			"wrapped); look for warnings yourself (journalctl -k)" >&2
+		rc=1
+	fi
 	grep -E 'tcm_fcsim|BUG:|WARNING:|Call Trace' /tmp/wsl-try.dmesg | tail -15
 	if grep -E 'BUG:|WARNING:|Call Trace' /tmp/wsl-try.dmesg >/dev/null; then
 		echo "wsl-try: kernel warnings in dmesg, see above" >&2
