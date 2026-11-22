@@ -14,6 +14,7 @@
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/stringify.h>
 #include <scsi/scsi_cmnd.h>
 #include <scsi/scsi_host.h>
 #include <scsi/scsi_proto.h>
@@ -282,12 +283,10 @@ static struct se_portal_group *fcsim_make_tpg(struct se_wwn *wwn,
 					      const char *name)
 {
 	struct fcsim_tport *tport = wwn_to_tport(wwn);
-	u16 tpgt;
 	int ret;
 
-	if (strstr(name, "tpgt_") != name)
-		return ERR_PTR(-EINVAL);
-	if (kstrtou16(name + 5, 10, &tpgt) || tpgt != FCSIM_TPGT) {
+	/* Exactly "tpgt_1", not also "tpgt_01" or "tpgt_+1". */
+	if (strcmp(name, "tpgt_" __stringify(FCSIM_TPGT))) {
 		pr_err("%s: only tpgt_%d is supported\n", tport->name, FCSIM_TPGT);
 		return ERR_PTR(-EINVAL);
 	}

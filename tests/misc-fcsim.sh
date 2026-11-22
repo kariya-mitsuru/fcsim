@@ -61,6 +61,22 @@ more=$(tail -1 $TPG/sessions | sed -n 's/^\.\.\. \([0-9]*\) more$/\1/p')
 echo "  ok: $((lines - 1)) listed + $more more = $N"
 for h in "$HOSTS"/*; do rmdir "$h"; done
 
+step "tmr_timeout range, TPG name"
+P=/sys/module/tcm_fcsim/parameters/tmr_timeout
+for v in 0 3601 x; do
+	if echo $v > $P 2>/dev/null; then fail "tmr_timeout=$v accepted"; fi
+done
+echo 1 > $P && echo 3600 > $P && echo 10 > $P || fail "valid tmr_timeout refused"
+[ "$(cat $P)" = 10 ] || fail "tmr_timeout reads $(cat $P)"
+W=21:00:00:00:00:00:00:0e
+mkdir "$LIO/fcsim/$W"
+for t in tpgt_01 tpgt_+1 tpgt_2 tpgt_; do
+	if mkdir "$LIO/fcsim/$W/$t" 2>/dev/null; then fail "$t accepted"; fi
+done
+mkdir "$LIO/fcsim/$W/tpgt_1" || fail "tpgt_1 refused"
+rmdir "$LIO/fcsim/$W/tpgt_1" "$LIO/fcsim/$W"
+echo "  OK"
+
 step "a WWPN is never both an initiator and a target port"
 # Create both at once: one of the two must be refused, however the
 # (slow) Scsi_Host setup of the initiator port interleaves.

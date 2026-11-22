@@ -21,7 +21,9 @@
  *
  * About a target port, the FPIN goes to every initiator port that is up
  * and zoned with it, as a switch would do; about an initiator port, only
- * to that port.  It is delivered as a real ELS FPIN payload through
+ * to that port.  The target port need not be online (enabled TPG): the
+ * notification is what a test asks for, e.g. about a port that just went
+ * away.  It is delivered as a real ELS FPIN payload through
  * fc_host_fpin_rcv(): the FC transport counts it (fc_host and rport
  * statistics/fpin_*) and posts it as an FC netlink event, which is what
  * multipathd's "marginal_pathgroups fpin" reacts to.

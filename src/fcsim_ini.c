@@ -16,6 +16,7 @@
 
 #include <linux/module.h>
 #include <linux/moduleparam.h>
+#include <linux/kstrtox.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
@@ -35,10 +36,32 @@
 
 static struct scsi_transport_template *fcsim_transport;
 
+#define FCSIM_TMR_TIMEOUT_MAX	3600
+
 static unsigned int tmr_timeout = 10;
-module_param(tmr_timeout, uint, 0644);
+
+/* 0 would fail every TMR at once and send EH straight to a host reset. */
+static int fcsim_tmr_timeout_set(const char *val, const struct kernel_param *kp)
+{
+	unsigned int v;
+	int ret;
+
+	ret = kstrtouint(val, 0, &v);
+	if (ret)
+		return ret;
+	if (v < 1 || v > FCSIM_TMR_TIMEOUT_MAX)
+		return -ERANGE;
+	WRITE_ONCE(*(unsigned int *)kp->arg, v);
+	return 0;
+}
+
+static const struct kernel_param_ops fcsim_tmr_timeout_ops = {
+	.set	= fcsim_tmr_timeout_set,
+	.get	= param_get_uint,
+};
+module_param_cb(tmr_timeout, &fcsim_tmr_timeout_ops, &tmr_timeout, 0644);
 MODULE_PARM_DESC(tmr_timeout,
-		 "seconds SCSI EH waits for a task management response (default 10)");
+		 "seconds SCSI EH waits for a task management response (1-3600, default 10)");
 
 
 static inline struct fcsim_iport *shost_to_iport(struct Scsi_Host *shost)
@@ -690,9 +713,14 @@ static int fcsim_issue_tmr(struct scsi_device *sdev, u64 tag,
 	if (!rport)
 		return TMR_FUNCTION_FAILED;
 
+	/* The TMF is an FCP_CMND without data. */
+	fcsim_stat_inc(iport, fcp_control_requests);
+	fcsim_stat_seq(iport, true, FCSIM_FCP_CMND_LEN);
+
 	if (fcsim_fault_eval(iport, rport->port_name, true, &act) &&
 	    act.drop != FCSIM_DROP_NONE) {
 		/* The fabric loses the TMF: nobody ever answers it. */
+		fcsim_stat_inc(iport, dumped_frames);
 		sdev_printk(KERN_INFO, sdev, "fault: dropping TMR %d\n", tmr);
 		schedule_timeout_uninterruptible(tmo);
 		return TMR_FUNCTION_FAILED;
@@ -726,6 +754,7 @@ static int fcsim_issue_tmr(struct scsi_device *sdev, u64 tag,
 
 	switch (state) {
 	case FCSIM_TMR_RESPONDED:
+		fcsim_stat_seq(iport, false, FCSIM_FCP_RSP_LEN);	/* FCP_RSP */
 		ret = cmd->se_cmd.se_tmr_req->response;
 		target_put_sess_cmd(&cmd->se_cmd);	/* our ACK reference */
 		break;

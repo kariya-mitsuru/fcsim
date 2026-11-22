@@ -21,6 +21,7 @@
 #include <linux/workqueue.h>
 #include <linux/device.h>
 #include <linux/string.h>
+#include <linux/ratelimit.h>
 #include <target/target_core_fabric.h>
 
 #include "fcsim.h"
@@ -136,8 +137,6 @@ bool fcsim_wwpn_in_use(u64 wwpn)
 	return false;
 }
 
-/* ------------------------------------------------------------- nexus */
-
 /* ------------------------------------------------------------- attributes */
 
 /*
@@ -199,11 +198,15 @@ static bool fcsim_note_refusal(struct fcsim_iport *iport,
 		return true;
 	}
 	r = kzalloc(sizeof(*r), GFP_KERNEL);
-	if (r) {
-		r->tport = tport;
-		r->err = err;
-		list_add_tail(&r->node, &iport->refused_list);
+	if (!r) {
+		/* Cannot remember it: log, but not on every retry. */
+		static DEFINE_RATELIMIT_STATE(rs, 60 * HZ, 1);
+
+		return __ratelimit(&rs);
 	}
+	r->tport = tport;
+	r->err = err;
+	list_add_tail(&r->node, &iport->refused_list);
 	return true;
 }
 

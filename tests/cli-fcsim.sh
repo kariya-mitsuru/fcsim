@@ -70,6 +70,21 @@ echo "  dumped_frames $(hexval $S/dumped_frames)  fcp_packet_aborts $(hexval $S/
 [ "$(hexval $S/dumped_frames)" = 1 ] && [ "$(hexval $S/fcp_packet_aborts)" = 1 ] || fail "drop stats"
 $CTL fault clear $I1 $T1
 
+step "task management requests are counted as control requests"
+# The fabric drops the one TMF of a LUN reset that is not escalated: it is
+# then the only FCP_CMND, and the reset fails after tmr_timeout.
+echo 1 > /sys/module/tcm_fcsim/parameters/tmr_timeout
+$CTL fault set $I1 $T1 drop=cmd count=1
+$CTL stats $I1 --reset
+# Through the sg node: closing the block device makes udev probe it.
+SG=/dev/$(basename /sys/block/$D/device/scsi_generic/*)
+if sg_reset -d -N $SG 2>/dev/null; then fail "LUN reset succeeded without a response"; fi
+ctl=$(hexval $S/fcp_control_requests); dumped=$(hexval $S/dumped_frames)
+echo "  fcp_control_requests $ctl, dumped_frames $dumped"
+[ "$ctl" = 1 ] && [ "$dumped" = 1 ] || fail "the dropped TMF was not counted"
+$CTL fault clear $I1 $T1
+echo 10 > /sys/module/tcm_fcsim/parameters/tmr_timeout
+
 step "save / clear / restore"
 $CTL save /tmp/fcsim.json
 cat /tmp/fcsim.json
