@@ -2,7 +2,7 @@
 /*
  * tcm_fcsim: target side, a LIO fabric module named "fcsim".
  *
- *   /sys/kernel/config/target/fcsim/<target WWPN>/tpgt_1/{luns,acls,attrib,enable}
+ *   /sys/kernel/config/target/fcsim/<target WWPN>/tpgt_1/{lun,acls,attrib,enable}
  *
  * TPG attributes and their defaults follow tcm_qla2xxx, so any initiator
  * can log in but only sees LUNs through an explicit ACL.
@@ -384,8 +384,10 @@ static ssize_t fcsim_tpg_attrib_##_name##_store(struct config_item *item, \
 	mutex_lock(&fcsim_mutex);					\
 	WRITE_ONCE(tport->attrib._name, val);				\
 	mutex_unlock(&fcsim_mutex);					\
-	/* e.g. demo mode turned on: refused initiators may log in */	\
-	fcsim_fabric_kick();						\
+	/* e.g. demo mode turned on: refused initiators may log in.	\
+	 * Called by configfs alone (no LIO locks), so wait for it.	\
+	 */								\
+	fcsim_fabric_sync();						\
 	return count;							\
 }									\
 CONFIGFS_ATTR(fcsim_tpg_attrib_, _name)
@@ -471,7 +473,7 @@ static void fcsim_drop_wwn(struct se_wwn *wwn)
  */
 static ssize_t fcsim_wwn_version_show(struct config_item *item, char *page)
 {
-	return sysfs_emit(page, "tcm_fcsim %s\n", FCSIM_VERSION);
+	return sysfs_emit(page, "%s\n", FCSIM_VERSION);
 }
 
 CONFIGFS_ATTR_RO(fcsim_wwn_, version);

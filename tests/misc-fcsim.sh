@@ -41,7 +41,8 @@ echo "  ok: 10 retries, no new log lines"
 
 step "TPG attribute: demo mode on lets the refused initiator in"
 echo 1 > $TPG/attrib/generate_node_acls
-wait_for 5 sh -c "[ -n \"\$(cat $HOSTS/$I1/targets)\" ]" || fail "no login after enabling demo mode"
+# The store waits for the reconcile: logged in when write() returns.
+[ -n "$(cat $HOSTS/$I1/targets)" ] || fail "no login when the attribute write returned"
 echo "  targets: $(cat $HOSTS/$I1/targets)"
 echo 0 > $TPG/attrib/generate_node_acls
 cat $TPG/attrib/generate_node_acls

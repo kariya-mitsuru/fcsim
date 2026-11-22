@@ -122,10 +122,12 @@ struct fcsim_iport {
 	struct list_head	refused_list;	/* logins the target refused (fcsim_main.c) */
 	atomic_t		ndraining;	/* logged-out sessions still draining */
 
-	/* Commands held by the fabric (delayed / dropped), see fcsim_ini.c. */
-	spinlock_t		held_lock;
-	struct list_head	held_list;
-	struct list_head	faults;		/* fcsim_fault rules (RCU, held_lock) */
+	/*
+	 * Fault injection: the rules, and the ->held state of the exchanges
+	 * the fabric holds (delayed / dropped) against their delay timer.
+	 */
+	spinlock_t		fault_lock;
+	struct list_head	faults;		/* fcsim_fault rules (RCU, fault_lock) */
 
 	struct fcsim_stats __percpu *stats;
 	spinlock_t		stats_lock;	/* stats_base, fc_stats */
@@ -143,6 +145,12 @@ struct fcsim_tpg_attrib {
 	int			prod_mode_write_protect;
 	int			demo_mode_login_only;
 };
+
+/* The initiator port is on the fabric (fcsim_mutex). */
+static inline bool fcsim_iport_online(const struct fcsim_iport *iport)
+{
+	return iport->link_up && !iport->removing;
+}
 
 /* Target port: one LIO WWN with its single tpgt_1. */
 struct fcsim_tport {
@@ -190,16 +198,14 @@ struct fcsim_cmd {
 	struct scsi_cmnd	*sc;		/* NULL: completed or terminated */
 	struct kref		kref;
 	bool			lio;		/* handed to LIO */
-	bool			held;		/* on iport->held_list */
+	bool			held;		/* held by the fabric (iport->fault_lock) */
 	bool			drop_rsp;	/* fault: the response gets lost */
 	u64			tport_wwpn;
 	u64			lun;
-	u64			tag;
 	u32			data_len;
 	u8			dir;		/* enum dma_data_direction */
 	u8			tmr_state;	/* enum fcsim_tmr_state (TMR only) */
 	u8			cdb[32];
-	struct list_head	held_node;
 	struct timer_list	delay_timer;
 	struct completion	tmr_done;
 	unsigned char		sense_buf[TRANSPORT_SENSE_BUFFER];
@@ -232,6 +238,8 @@ bool fcsim_wwpn_in_use(u64 wwpn);
 struct fcsim_nexus *fcsim_nexus_lookup_rcu(struct fcsim_iport *iport, u64 tport_wwpn);
 
 int fcsim_parse_wwn(const char *str, u64 *wwn);
+int fcsim_parse_bool(const char *page, const char *on, const char *off,
+		     bool *val);
 void fcsim_format_wwn(char *buf, size_t len, u64 wwn);
 u64 fcsim_default_wwnn(u64 wwpn);
 

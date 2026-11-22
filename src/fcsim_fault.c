@@ -282,9 +282,9 @@ static struct config_group *fcsim_faults_make_group(struct config_group *group,
 	atomic64_set(&f->injected, 0);
 	config_group_init_type_name(&f->group, name, &fcsim_fault_type);
 
-	spin_lock_irqsave(&iport->held_lock, flags);
+	spin_lock_irqsave(&iport->fault_lock, flags);
 	list_add_tail_rcu(&f->node, &iport->faults);
-	spin_unlock_irqrestore(&iport->held_lock, flags);
+	spin_unlock_irqrestore(&iport->fault_lock, flags);
 
 	return &f->group;
 }
@@ -295,9 +295,9 @@ static void fcsim_faults_drop_item(struct config_group *group,
 	struct fcsim_fault *f = to_fault(item);
 	unsigned long flags;
 
-	spin_lock_irqsave(&f->iport->held_lock, flags);
+	spin_lock_irqsave(&f->iport->fault_lock, flags);
 	list_del_rcu(&f->node);
-	spin_unlock_irqrestore(&f->iport->held_lock, flags);
+	spin_unlock_irqrestore(&f->iport->fault_lock, flags);
 
 	config_item_put(item);
 }

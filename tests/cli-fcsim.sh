@@ -84,6 +84,26 @@ echo "  fcp_control_requests $ctl, dumped_frames $dumped"
 $CTL fault clear $I1 $T1
 echo 10 > /sys/module/tcm_fcsim/parameters/tmr_timeout
 
+step "statistics of injected errors and lost responses"
+TUR="00 00 00 00 00 00"
+# An injected error: the FCP_CMND left the HBA all the same.
+$CTL fault set $I1 $T1 error=medium count=1
+$CTL stats $I1 --reset
+if sg_raw $SG $TUR >/dev/null 2>&1; then fail "TUR succeeded despite error=medium"; fi
+ctl=$(hexval $S/fcp_control_requests); tx=$(hexval $S/tx_frames)
+echo "  error: fcp_control_requests $ctl, tx_frames $tx"
+[ "$ctl" = 1 ] && [ "$tx" = 1 ] || fail "the FCP_CMND of an injected error was not counted"
+$CTL fault clear $I1 $T1
+# A lost FCP_RSP is dumped, not received: the only frame received is the
+# response to the ABORT TASK that EH sends after the timeout.
+$CTL fault set $I1 $T1 drop=rsp count=1
+$CTL stats $I1 --reset
+if sg_raw -t 2 $SG $TUR >/dev/null 2>&1; then fail "TUR succeeded without a response"; fi
+tx=$(hexval $S/tx_frames); rx=$(hexval $S/rx_frames); dumped=$(hexval $S/dumped_frames)
+echo "  drop=rsp: tx_frames $tx, rx_frames $rx, dumped_frames $dumped"
+[ "$tx" = 2 ] && [ "$rx" = 1 ] && [ "$dumped" = 1 ] || fail "drop=rsp frame counts"
+$CTL fault clear $I1 $T1
+
 step "save / clear / restore"
 $CTL save /tmp/fcsim.json
 cat /tmp/fcsim.json

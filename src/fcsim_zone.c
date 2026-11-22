@@ -11,7 +11,8 @@
  *                     mode <off|on>
  *                     zone <name> <wwpn> <wwpn> ...
  *     zones/<name>/
- *       members     staged WWPNs, one per line (a write replaces the list)
+ *       members     staged WWPNs; a write replaces the list (separated by
+ *                   white space or ','), a read gives one per line
  *
  * With mode off every initiator sees every target port.  With mode on an
  * initiator port and a target port may log in to each other only if some
@@ -194,7 +195,7 @@ static void fcsim_zone_rscn(const struct fcsim_zoneset *old,
 	struct fcsim_tport *tport;
 
 	list_for_each_entry(iport, &fcsim_iports, node) {
-		if (!iport->link_up || iport->removing)
+		if (!fcsim_iport_online(iport))
 			continue;
 		list_for_each_entry(tport, &fcsim_tports, node) {
 			if (!fcsim_tport_online(tport))
@@ -421,11 +422,7 @@ static ssize_t fcsim_zoning_mode_store(struct config_item *item,
 {
 	bool on;
 
-	if (sysfs_streq(page, "on"))
-		on = true;
-	else if (sysfs_streq(page, "off"))
-		on = false;
-	else if (kstrtobool(page, &on))
+	if (fcsim_parse_bool(page, "on", "off", &on))
 		return -EINVAL;
 
 	mutex_lock(&fcsim_zone_mutex);

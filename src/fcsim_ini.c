@@ -63,7 +63,6 @@ module_param_cb(tmr_timeout, &fcsim_tmr_timeout_ops, &tmr_timeout, 0644);
 MODULE_PARM_DESC(tmr_timeout,
 		 "seconds SCSI EH waits for a task management response (1-3600, default 10)");
 
-
 static inline struct fcsim_iport *shost_to_iport(struct Scsi_Host *shost)
 {
 	return *(struct fcsim_iport **)shost_priv(shost);
@@ -178,7 +177,6 @@ static struct fcsim_cmd *fcsim_xchg_alloc(struct fcsim_iport *iport, gfp_t gfp)
 	memset(&cmd->body, 0, sizeof(cmd->body));
 	cmd->iport = iport;
 	kref_init(&cmd->kref);
-	INIT_LIST_HEAD(&cmd->held_node);
 	timer_setup(&cmd->delay_timer, fcsim_delay_timer_fn, 0);
 	init_completion(&cmd->tmr_done);
 	return cmd;
@@ -259,10 +257,9 @@ static void fcsim_xchg_finish(struct fcsim_cmd *cmd, unsigned long flags,
 	cmd->sc = NULL;
 	WRITE_ONCE(p->cmd, NULL);
 	if (held) {
-		spin_lock(&cmd->iport->held_lock);
-		list_del_init(&cmd->held_node);
+		spin_lock(&cmd->iport->fault_lock);
 		cmd->held = false;
-		spin_unlock(&cmd->iport->held_lock);
+		spin_unlock(&cmd->iport->fault_lock);
 	}
 
 	rcu_read_lock();
@@ -417,7 +414,9 @@ void fcsim_xchg_status(struct fcsim_cmd *cmd, bool data_in)
 		fcsim_stat_seq(cmd->iport, false, len);
 		fcsim_stat_add(cmd->iport, fcp_input_bytes, len);
 	}
-	fcsim_stat_seq(cmd->iport, false, FCSIM_FCP_RSP_LEN);	/* FCP_RSP */
+	/* FCP_RSP; one the fabric loses is counted in release_cmd instead. */
+	if (!cmd->drop_rsp)
+		fcsim_stat_seq(cmd->iport, false, FCSIM_FCP_RSP_LEN);
 
 	if (se_cmd->sense_buffer &&
 	    (se_cmd->se_cmd_flags & (SCF_TRANSPORT_TASK_SENSE |
@@ -452,12 +451,11 @@ static void fcsim_hold_locked(struct fcsim_cmd *cmd, u32 delay_ms)
 {
 	struct fcsim_iport *iport = cmd->iport;
 
-	spin_lock(&iport->held_lock);
+	spin_lock(&iport->fault_lock);
 	cmd->held = true;
-	list_add_tail(&cmd->held_node, &iport->held_list);
 	if (delay_ms)
 		mod_timer(&cmd->delay_timer, jiffies + msecs_to_jiffies(delay_ms));
-	spin_unlock(&iport->held_lock);
+	spin_unlock(&iport->fault_lock);
 }
 
 /* release_cmd: LIO is done with the exchange. */
@@ -547,11 +545,10 @@ static void fcsim_deliver(struct fcsim_cmd *cmd)
 	if (!cmd->sc) {
 		/*
 		 * Terminated while target_init_cmd() ran: the command never
-		 * reaches the target.  In practice this is EH (abort, host
-		 * reset) against a command the delay timer is delivering; a
-		 * logout first quiesces the queue (fc_remote_port_delete),
-		 * which waits for queuecommand and, through an RCU grace
-		 * period, for the timer softirq.
+		 * reaches the target.  This is EH (abort, host reset) or a
+		 * logout (fcsim_terminate_tport) against a command the delay
+		 * timer is delivering: the timer may have found the nexus
+		 * before the logout unpublished it.
 		 * Before target_submit_prep() there is no LUN yet, so drop the
 		 * se_cmd the way LIO itself does there: the last session
 		 * command reference calls release_cmd, which drops LIO's
@@ -581,15 +578,14 @@ static void fcsim_delay_timer_fn(struct timer_list *t)
 	struct fcsim_iport *iport = cmd->iport;
 	unsigned long flags;
 
-	spin_lock_irqsave(&iport->held_lock, flags);
+	spin_lock_irqsave(&iport->fault_lock, flags);
 	if (!cmd->held) {		/* terminated meanwhile */
-		spin_unlock_irqrestore(&iport->held_lock, flags);
+		spin_unlock_irqrestore(&iport->fault_lock, flags);
 		return;
 	}
-	list_del_init(&cmd->held_node);
 	cmd->held = false;
 	kref_get(&cmd->kref);	/* still attached, so the SCSI ref is alive */
-	spin_unlock_irqrestore(&iport->held_lock, flags);
+	spin_unlock_irqrestore(&iport->fault_lock, flags);
 
 	fcsim_deliver(cmd);
 	fcsim_xchg_put(cmd);
@@ -642,6 +638,15 @@ static int fcsim_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *sc)
 		return 0;
 	}
 
+	/* FCP_CMND leaves the HBA, whatever the fabric then does with it. */
+	if (sc->sc_data_direction == DMA_FROM_DEVICE && scsi_bufflen(sc))
+		fcsim_stat_inc(iport, fcp_input_requests);
+	else if (sc->sc_data_direction == DMA_TO_DEVICE && scsi_bufflen(sc))
+		fcsim_stat_inc(iport, fcp_output_requests);
+	else
+		fcsim_stat_inc(iport, fcp_control_requests);
+	fcsim_stat_seq(iport, true, FCSIM_FCP_CMND_LEN);
+
 	if (fcsim_fault_eval(iport, rport->port_name, false, &act) && act.error) {
 		/* The fabric answers right away; nothing reaches the target. */
 		fcsim_inject_error(sc, act.error);
@@ -655,22 +660,13 @@ static int fcsim_queuecommand(struct Scsi_Host *shost, struct scsi_cmnd *sc)
 	cmd->sc = sc;
 	cmd->tport_wwpn = rport->port_name;
 	cmd->lun = sc->device->lun;
-	cmd->tag = blk_mq_unique_tag(scsi_cmd_to_rq(sc));
-	cmd->se_cmd.tag = cmd->tag;
+	cmd->se_cmd.tag = blk_mq_unique_tag(scsi_cmd_to_rq(sc));
 	cmd->data_len = scsi_bufflen(sc);
 	cmd->dir = sc->sc_data_direction;
 	memcpy(cmd->cdb, sc->cmnd, min_t(unsigned int, sc->cmd_len,
 					 sizeof(cmd->cdb)));
 	cmd->drop_rsp = act.drop == FCSIM_DROP_RSP;
 
-	/* FCP_CMND leaves the HBA. */
-	if (cmd->dir == DMA_FROM_DEVICE && cmd->data_len)
-		fcsim_stat_inc(iport, fcp_input_requests);
-	else if (cmd->dir == DMA_TO_DEVICE && cmd->data_len)
-		fcsim_stat_inc(iport, fcp_output_requests);
-	else
-		fcsim_stat_inc(iport, fcp_control_requests);
-	fcsim_stat_seq(iport, true, FCSIM_FCP_CMND_LEN);
 	if (act.drop == FCSIM_DROP_CMD)
 		fcsim_stat_inc(iport, dumped_frames);
 
@@ -818,17 +814,29 @@ static int fcsim_eh_abort(struct scsi_cmnd *sc)
 	return SUCCESS;
 }
 
+/*
+ * fc_block_scsi_eh() for the reset handlers: on FAST_IO_FAIL, terminate the
+ * exchanges in the scope and return it.
+ */
+static int fcsim_eh_block(struct scsi_cmnd *sc, struct fcsim_scope *s)
+{
+	int ret = fc_block_scsi_eh(sc);
+
+	if (ret) {
+		s->host_byte = DID_TRANSPORT_FAILFAST;
+		fcsim_terminate(sc->device->host, s);
+	}
+	return ret;
+}
+
 static int fcsim_eh_device_reset(struct scsi_cmnd *sc)
 {
 	struct fcsim_scope s = { .sdev = sc->device, .host_byte = DID_RESET };
 	int ret;
 
-	ret = fc_block_scsi_eh(sc);
-	if (ret) {
-		s.host_byte = DID_TRANSPORT_FAILFAST;
-		fcsim_terminate(sc->device->host, &s);
+	ret = fcsim_eh_block(sc, &s);
+	if (ret)
 		return ret;
-	}
 
 	ret = fcsim_issue_tmr(sc->device, 0, TMR_LUN_RESET);
 	if (ret != TMR_FUNCTION_COMPLETE)
@@ -855,12 +863,9 @@ static int fcsim_eh_target_reset(struct scsi_cmnd *sc)
 	struct fcsim_scope s = { .starget = starget, .host_byte = DID_RESET };
 	int ret, failed = 0;
 
-	ret = fc_block_scsi_eh(sc);
-	if (ret) {
-		s.host_byte = DID_TRANSPORT_FAILFAST;
-		fcsim_terminate(sc->device->host, &s);
+	ret = fcsim_eh_block(sc, &s);
+	if (ret)
 		return ret;
-	}
 
 	starget_for_each_device(starget, &failed, fcsim_lun_reset_fn);
 	if (failed)
@@ -1055,9 +1060,8 @@ struct fcsim_iport *fcsim_iport_create(u64 wwpn)
 	INIT_LIST_HEAD(&iport->nexus_list);
 	INIT_LIST_HEAD(&iport->draining_list);
 	INIT_LIST_HEAD(&iport->refused_list);
-	INIT_LIST_HEAD(&iport->held_list);
 	INIT_LIST_HEAD(&iport->faults);
-	spin_lock_init(&iport->held_lock);
+	spin_lock_init(&iport->fault_lock);
 	spin_lock_init(&iport->stats_lock);
 	atomic_set(&iport->ndraining, 0);
 	iport->stats = alloc_percpu(struct fcsim_stats);
@@ -1155,8 +1159,9 @@ void fcsim_iport_destroy(struct fcsim_iport *iport)
 	}
 
 	mutex_lock(&fcsim_mutex);
+	/* The reconcile in the sync logged it out and forgot its refusals. */
 	WARN_ON(!list_empty(&iport->nexus_list));
-	fcsim_forget_refusals(iport, NULL);
+	WARN_ON(!list_empty(&iport->refused_list));
 	list_del(&iport->node);
 	fcsim_port_id_free(iport->port_id);
 	mutex_unlock(&fcsim_mutex);

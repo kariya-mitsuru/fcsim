@@ -21,6 +21,7 @@
 #include <linux/workqueue.h>
 #include <linux/device.h>
 #include <linux/string.h>
+#include <linux/kstrtox.h>
 #include <linux/ratelimit.h>
 #include <target/target_core_fabric.h>
 
@@ -45,6 +46,21 @@ static u32 fcsim_nexus_index;
 
 static void fcsim_fabric_work_fn(struct work_struct *work);
 static DECLARE_WORK(fcsim_fabric_work, fcsim_fabric_work_fn);
+
+/* ---------------------------------------------------------------- parsing */
+
+/* <on> / <off> (e.g. "up" / "down"), or anything kstrtobool() takes. */
+int fcsim_parse_bool(const char *page, const char *on, const char *off,
+		     bool *val)
+{
+	if (sysfs_streq(page, on))
+		*val = true;
+	else if (sysfs_streq(page, off))
+		*val = false;
+	else if (kstrtobool(page, val))
+		return -EINVAL;
+	return 0;
+}
 
 /* ---------------------------------------------------------------- WWN utils */
 
@@ -261,7 +277,7 @@ static struct fcsim_nexus *fcsim_nexus_find(struct fcsim_iport *iport,
 
 static bool fcsim_nexus_wanted(struct fcsim_nexus *nexus)
 {
-	return nexus->iport->link_up && !nexus->iport->removing &&
+	return fcsim_iport_online(nexus->iport) &&
 	       fcsim_tport_online(nexus->tport) && !READ_ONCE(nexus->closing) &&
 	       fcsim_zone_allows(nexus->iport->wwpn, nexus->tport->wwpn);
 }
@@ -407,13 +423,13 @@ static void fcsim_reconcile(void)
 		fcsim_forget_refusals(NULL, tport);
 		/* Like a switch, only to the initiators zoned with it. */
 		list_for_each_entry(iport, &fcsim_iports, node)
-			if (iport->link_up && !iport->removing &&
+			if (fcsim_iport_online(iport) &&
 			    fcsim_zone_allows(iport->wwpn, tport->wwpn))
 				fcsim_post_rscn(iport, tport->port_id);
 	}
 
 	list_for_each_entry(iport, &fcsim_iports, node) {
-		if (!iport->link_up || iport->removing) {
+		if (!fcsim_iport_online(iport)) {
 			fcsim_forget_refusals(iport, NULL);
 			continue;
 		}
@@ -438,7 +454,7 @@ static void fcsim_fabric_work_fn(struct work_struct *work)
 
 /*
  * Schedule a reconcile.  Safe from any context that may hold LIO locks
- * (ACL creation, close_session, attribute stores).
+ * (ACL creation, close_session).
  */
 void fcsim_fabric_kick(void)
 {

@@ -77,11 +77,7 @@ static ssize_t fcsim_host_link_store(struct config_item *item,
 {
 	bool up;
 
-	if (sysfs_streq(page, "up"))
-		up = true;
-	else if (sysfs_streq(page, "down"))
-		up = false;
-	else if (kstrtobool(page, &up))
+	if (fcsim_parse_bool(page, "up", "down", &up))
 		return -EINVAL;
 
 	fcsim_iport_set_link(to_iport(item), up);

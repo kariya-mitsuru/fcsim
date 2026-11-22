@@ -76,6 +76,16 @@ static const struct fcsim_fpin_name fcsim_deli_reasons[] = {
 	{ }
 };
 
+static const struct {
+	const char			*name;
+	const struct fcsim_fpin_name	*events;	/* the first is the default */
+} fcsim_fpin_kinds[] = {
+	[FPIN_K_LI] = { "li", fcsim_li_events },
+	[FPIN_K_PN] = { "pn", fcsim_congn_events },
+	[FPIN_K_DN] = { "dn", fcsim_deli_reasons },
+	[FPIN_K_CN] = { "cn", fcsim_congn_events },
+};
+
 /* A parsed request. */
 struct fcsim_fpin_req {
 	enum fcsim_fpin_kind	kind;
@@ -106,6 +116,7 @@ static int fcsim_fpin_parse(char *line, struct fcsim_fpin_req *r)
 {
 	const struct fcsim_fpin_name *events;
 	char *tok, *kind, *wwpn;
+	unsigned int k;
 	int ret;
 
 	kind = strsep(&line, " \t\n");
@@ -118,22 +129,14 @@ static int fcsim_fpin_parse(char *line, struct fcsim_fpin_req *r)
 	r->threshold = 1000;
 	r->period = 1000;
 	r->severity = FPIN_CONGN_SEVERITY_WARNING;
-	if (!strcmp(kind, "li")) {
-		r->kind = FPIN_K_LI;
-		events = fcsim_li_events;
-	} else if (!strcmp(kind, "pn")) {
-		r->kind = FPIN_K_PN;
-		events = fcsim_congn_events;
-	} else if (!strcmp(kind, "dn")) {
-		r->kind = FPIN_K_DN;
-		events = fcsim_deli_reasons;
-	} else if (!strcmp(kind, "cn")) {
-		r->kind = FPIN_K_CN;
-		events = fcsim_congn_events;
-	} else {
+	for (k = 0; k < ARRAY_SIZE(fcsim_fpin_kinds); k++)
+		if (!strcmp(kind, fcsim_fpin_kinds[k].name))
+			break;
+	if (k == ARRAY_SIZE(fcsim_fpin_kinds))
 		return -EINVAL;
-	}
-	r->event = events[0].value;		/* the first one is the default */
+	r->kind = k;
+	events = fcsim_fpin_kinds[k].events;
+	r->event = events[0].value;
 
 	ret = fcsim_parse_wwn(wwpn, &r->wwpn);
 	if (ret)
@@ -260,7 +263,6 @@ static u32 fcsim_fpin_build(const struct fcsim_fpin_req *r, u32 port_id,
 
 static int fcsim_fpin_send(const struct fcsim_fpin_req *r)
 {
-	static const char *const kinds[] = { "li", "pn", "dn", "cn" };
 	struct fcsim_iport *iport;
 	struct fcsim_tport *tport, *about_t = NULL;
 	struct fcsim_iport *about_i = NULL;
@@ -290,7 +292,7 @@ static int fcsim_fpin_send(const struct fcsim_fpin_req *r)
 	len = fcsim_fpin_build(r, port_id, buf);
 
 	list_for_each_entry(iport, &fcsim_iports, node) {
-		if (!iport->link_up || iport->removing)
+		if (!fcsim_iport_online(iport))
 			continue;
 		if (about_i ? iport != about_i :
 		    !fcsim_zone_allows(iport->wwpn, about_t->wwpn))
@@ -303,7 +305,7 @@ static int fcsim_fpin_send(const struct fcsim_fpin_req *r)
 
 	fcsim_format_wwn(name, sizeof(name), r->wwpn);
 	pr_info("FPIN %s about %s (event 0x%x) sent to %u port(s)\n",
-		kinds[r->kind], name, r->event, sent);
+		fcsim_fpin_kinds[r->kind].name, name, r->event, sent);
 	return 0;
 }
 
