@@ -11,6 +11,58 @@ FC HBA なしで「FC ストレージ」をエミュレーションする Linux 
 
 ## 1. 全体像
 
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 300}}}%%
+flowchart LR
+  SCSI["`**initiator**
+
+SCSI 層
+
+sd / sg`"]
+
+  subgraph MOD["tcm_fcsim.ko"]
+    IPORT["`**iport**（仮想 HBA）
+
+Scsi_Host + fc_host
+
+rport（相手 tport）
+
+_fcsim/hosts/_`"]
+    FAB["`**仮想ファブリック**
+
+port_id 割当
+
+ログイン管理（reconcile）
+
+ゾーニング・障害注入・FPIN
+
+_fcsim/zoning, zones, fpin_`"]
+    TPORT["`**tport**
+
+LIO se_wwn
+
+tpgt_1
+
+_target/fcsim/_`"]
+    IPORT <--> FAB <--> TPORT
+  end
+
+  LIO["`**target**
+
+LIO core
+
+backstore / ACL / LUN`"]
+
+  SCSI <--> IPORT
+  TPORT <--> LIO
+```
+
+斜体は設定する configfs（`/sys/kernel/config/` からの相対パス）。`fcsim/` は独自 configfs で `fcsimctl` が、
+`target/fcsim/` は LIO の configfs で targetcli が扱う。
+
+<details>
+<summary>テキスト版</summary>
+
 ```
             ┌──────────────────── tcm_fcsim.ko ────────────────────┐
  initiator  │  iport (仮想 HBA)        仮想ファブリック       tport  │  target
@@ -21,6 +73,8 @@ FC HBA なしで「FC ストレージ」をエミュレーションする Linux 
  設定:      /sys/kernel/config/fcsim/...            /sys/kernel/config/target/fcsim/...
             (独自 configfs)                          (LIO configfs = targetcli)
 ```
+
+</details>
 
 ## 2. 決定事項
 
