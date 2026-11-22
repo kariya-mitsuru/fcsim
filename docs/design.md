@@ -300,10 +300,14 @@ scripts/run-guest-test.sh   ゲストでテストを 1 本実行し、出力と 
 scripts/vng-run.sh          virtme-ng で開発用カーネル、または KIMG のカーネル（AlmaLinux 9 等）を起動
 scripts/build-kernel.sh     開発用カーネル（KASAN / lockdep）のビルド
 scripts/build-wsl-kernel.sh 実行中の WSL2 カーネルと同じソース・設定のツリーを取得・ビルド
+scripts/wsl-try.sh          実機の WSL2 カーネルで確認を取りながら試す（読み込み → ramdisk の LUN への I/O）
+packaging/                  AlmaLinux 9 向け DKMS RPM の spec と dkms.conf（make rpm）
 build/<release>/            開発用以外のカーネル向けのビルド（make el9 / make wsl / make KVER=...）
 tests/            virtme-ng ゲスト内で実行するテスト（make test で全部）
+  lib.sh, guest-setup.sh                     共通の関数、ゲストの準備（D-Bus など）
+  fc-events.py                               FC transport の netlink イベントを表示する
   smoke-fcsim.sh, smoke-fcsim-targetcli.sh   基本動作、targetcli 連携
-  race-fcsim.sh {abort,close}                競合の回帰テスト（dbg_* パラメータで窓を広げる）
+  race-fcsim.sh {abort,close,deliver}        競合の回帰テスト（dbg_* パラメータで窓を広げる、または EH を演じる）
   fault-fcsim.sh                             障害注入、fast_io_fail_tmo、RSCN / link イベント（fc-events.py）
   hang-fcsim.sh                              バックエンド停止（dmsetup suspend）時の EH とファブリックの応答性
   multipath-fcsim.sh                         2 iport × 2 tport の dm-multipath フェイルオーバとデータ整合性
@@ -315,6 +319,9 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test で
   cli-fcsim.sh                               fcsimctl（作成・障害ルール・status・save/restore）と fc_host 統計
   zone-fcsim.sh                              ゾーニング（ステージングと commit、RSCN の宛先、revert、save/restore）
   fpin-fcsim.sh                              FPIN の宛先・統計・netlink、multipathd の marginal_pathgroups fpin
+  wsl-try-guest.sh                           scripts/wsl-try.sh をゲストの WSL2 カーネルで実行（make test-wsl のみ）
+  package-el9.sh                             DKMS RPM のインストール・利用・削除（make test-rpm）
+  smoke-nvme-fcloop.sh, smoke-tcm-loop.sh    参考: nvme fcloop と tcm_loop の動作確認（make test には含めない）
 ```
 
 ## 7. 段階

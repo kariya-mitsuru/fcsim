@@ -36,9 +36,21 @@ for t in fcsimctl fcsim-targetcli fcsim-targetctl; do
 done
 
 %post
-dkms add -m %{name} -v %{version} --rpm_safe_upgrade || :
-dkms build -m %{name} -v %{version} || :
-dkms install -m %{name} -v %{version} --force || :
+# A failed build must not fail the installation, but it must be visible:
+# typically kernel-devel for the running kernel is missing.
+fail() {
+	echo "%{name}: dkms $1 failed for kernel $(uname -r); the module is not installed." >&2
+	echo "%{name}: is kernel-devel-$(uname -r) installed?  See 'dkms status' and" \
+		"/var/lib/dkms/%{name}/%{version}/build/make.log" >&2
+}
+dkms add -m %{name} -v %{version} --rpm_safe_upgrade >/dev/null 2>&1 ||
+	dkms status -m %{name} -v %{version} | grep -q . || fail add
+if ! dkms build -m %{name} -v %{version}; then
+	fail build
+elif ! dkms install -m %{name} -v %{version} --force; then
+	fail install
+fi
+:
 
 %preun
 dkms remove -m %{name} -v %{version} --all --rpm_safe_upgrade || :

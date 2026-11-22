@@ -22,7 +22,8 @@
 KDIR ?= $(HOME)/build/linux-6.18
 VERSION := $(shell sed -n 's/^\#define FCSIM_VERSION[[:space:]]*"\(.*\)"/\1/p' src/fcsim.h)
 
-EL9_KVER ?= $(notdir $(lastword $(sort $(wildcard /lib/modules/*.el9*.x86_64))))
+# The newest installed EL9 kernel: version order (5.14.0-503 after 5.14.0-70).
+EL9_KVER ?= $(shell ls -d /lib/modules/*.el9*.x86_64 2>/dev/null | sort -V | tail -1 | xargs -r basename)
 KVER_KDIR ?= /lib/modules/$(KVER)/build
 WSL_KVER ?= $(shell uname -r)
 WSL_KDIR ?= $(HOME)/build/wsl2-$(firstword $(subst -, ,$(WSL_KVER)))

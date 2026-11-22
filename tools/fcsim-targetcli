@@ -8,6 +8,9 @@ import os
 import runpy
 import sys
 
+# Installed, the module lives in /usr/share/tcm_fcsim: run as root, Python
+# would leave a __pycache__ there that the package does not own.
+sys.dont_write_bytecode = True
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import fcsim_rtslib  # noqa: E402
 

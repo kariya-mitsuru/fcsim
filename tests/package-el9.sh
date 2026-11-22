@@ -15,6 +15,15 @@ I1=10:00:00:00:c9:00:00:01
 
 RPM=$(ls "$TOP"/rpmbuild/RPMS/noarch/tcm_fcsim-*.rpm | tail -1)
 
+step "without kernel-devel the install succeeds but says why there is no module"
+KBUILD=/lib/modules/$(uname -r)/build
+mv "$KBUILD" "$KBUILD.hidden"
+rpm -i "$RPM" 2>/tmp/rpm.err || { cat /tmp/rpm.err; fail "rpm -i failed"; }
+mv "$KBUILD.hidden" "$KBUILD"
+grep 'tcm_fcsim:' /tmp/rpm.err | sed 's/^/  /'
+grep -q "is kernel-devel-$(uname -r) installed" /tmp/rpm.err || fail "no warning about the failed build"
+rpm -e tcm_fcsim
+
 step "install $(basename "$RPM") (dkms builds the module for $(uname -r))"
 rpm -i "$RPM"
 dkms status | sed 's/^/  /'
@@ -44,6 +53,9 @@ rmdir "$LIO/fcsim"
 rmmod tcm_fcsim
 rpm -e tcm_fcsim
 if modinfo tcm_fcsim >/dev/null 2>&1; then fail "module left behind after rpm -e"; fi
+for d in /usr/share/tcm_fcsim /usr/src/tcm_fcsim-*; do
+	[ ! -e "$d" ] || fail "left behind after rpm -e: $(find "$d" | head -5)"
+done
 splat_check
 echo
 echo "PASS"
