@@ -69,7 +69,8 @@ TESTS = \
 	"cli tests/cli-fcsim.sh" \
 	"zone tests/zone-fcsim.sh" \
 	"fpin tests/fpin-fcsim.sh" \
-	"eh tests/eh-fcsim.sh"
+	"eh tests/eh-fcsim.sh" \
+	"scsi tests/scsi-fcsim.sh"
 
 run-tests = @rc=0; for t in $(TESTS); do scripts/run-guest-test.sh $$t || rc=1; done; exit $$rc
 
