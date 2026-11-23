@@ -35,7 +35,7 @@ start_events() {
 }
 
 splat_check() {
-	if dmesg | grep -E 'BUG:|WARNING:|KASAN|possible circular|INFO: task .* blocked|Call Trace'; then
+	if dmesg | grep -E 'BUG:|WARNING:|KASAN|UBSAN:|ODEBUG:|Oops|general protection fault|refcount_t:|possible circular|INFO: task .* blocked|rcu: INFO: .*detected stall|Call Trace'; then
 		fail "kernel splat detected"
 	fi
 }

@@ -4,7 +4,8 @@
 # TEST_TAG is appended to the output names (e.g. smoke-el9.log) and passed to
 # the test.  TEST_TIMEOUT (seconds, default 300) bounds the test inside the
 # guest, so that the dmesg of a hung test is still saved; the guest as a
-# whole gets 120 s more for booting and saving.
+# whole gets 120 s more for booting and saving.  On a kernel with kmemleak,
+# memory leaked during the test fails it (tests/kmemleak.sh).
 set -u
 PROJ=$(cd "$(dirname "$0")/.." && pwd)
 name=$1${TEST_TAG:+-$TEST_TAG}; shift
@@ -12,8 +13,10 @@ tmo=${TEST_TIMEOUT:-300}
 mkdir -p "$PROJ/.test-out"
 rm -f "$PROJ/.test-out/$name".{log,dmesg}
 timeout $((tmo + 120)) "$PROJ/scripts/vng-run.sh" -- bash -c \
-	"TEST_TAG='${TEST_TAG:-}' timeout -k 10 $tmo $* > .test-out/$name.log 2>&1
+	"tests/kmemleak.sh start
+	TEST_TAG='${TEST_TAG:-}' timeout -k 10 $tmo $* > .test-out/$name.log 2>&1
 	rc=\$?; [ \$rc = 124 ] && echo 'TIMEOUT after ${tmo}s' >> .test-out/$name.log
+	tests/kmemleak.sh check >> .test-out/$name.log 2>&1 || { [ \$rc != 0 ] || rc=1; }
 	echo exit=\$rc >> .test-out/$name.log; dmesg > .test-out/$name.dmesg" \
 	>/dev/null 2>&1
 rc=$?

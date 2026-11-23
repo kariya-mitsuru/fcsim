@@ -423,13 +423,15 @@ tools/fcsim-targetcli, fcsim-targetctl, fcsim_rtslib.py   targetcli 連携
 tools/fcsimctl                                            initiator 側・ファブリックの CLI
 scripts/run-guest-test.sh   ゲストでテストを 1 本実行し、出力と dmesg を .test-out/ に残す
 scripts/vng-run.sh          virtme-ng で開発用カーネル、または KIMG のカーネル（AlmaLinux 9 等）を起動
-scripts/build-kernel.sh     開発用カーネル（KASAN / lockdep）のビルド
+scripts/build-kernel.sh     開発用カーネル（KASAN / lockdep / kmemleak / UBSAN / DEBUG_OBJECTS）のビルド
 scripts/build-wsl-kernel.sh 実行中の WSL2 カーネルと同じソース・設定のツリーを取得・ビルド
 scripts/wsl-try.sh          実機の WSL2 カーネルで確認を取りながら試す（読み込み → ramdisk の LUN への I/O）
 packaging/                  AlmaLinux 9 向け DKMS RPM の spec と dkms.conf（make rpm）
 build/<release>/            開発用以外のカーネル向けのビルド（make el9 / make wsl / make KVER=...）
 tests/            virtme-ng ゲスト内で実行するテスト（make test の対象は smoke〜fpin の 13 本）
   lib.sh, guest-setup.sh                     共通の関数、ゲストの準備（D-Bus など）
+  kmemleak.sh                                各テストの前後で kmemleak を確かめる（run-guest-test.sh が呼ぶ。
+                                             kmemleak の無いカーネルでは何もしない）
   fc-events.py                               FC transport の netlink イベントを表示する
   smoke-fcsim.sh, smoke-fcsim-targetcli.sh   基本動作、targetcli 連携
   race-fcsim.sh {abort,close,deliver}        競合の回帰テスト（dbg_* パラメータで窓を広げる、または EH を演じる）
@@ -455,7 +457,8 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test の
 ```
 
 テストの出力とゲストの dmesg は `.test-out/<名前>[-<TEST_TAG>].{log,dmesg}` に残る。各テストはゲスト内で
-`TEST_TIMEOUT` 秒（既定 300）で打ち切り、その場合も dmesg を保存する。
+`TEST_TIMEOUT` 秒（既定 300）で打ち切り、その場合も dmesg を保存する。kmemleak のあるカーネル（開発用）では、
+テスト中に漏れたメモリがあればテストは失敗する（`tests/kmemleak.sh`、起動時の漏れは数えない）。
 
 未実装のテスト: ゾーン変更で rport・パス数が変わったときの multipathd の追従（stage3-plan.md の 3b で予定していたもの）。
 

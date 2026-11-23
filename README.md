@@ -14,7 +14,7 @@ FC HBA なしで「FC ストレージ」をエミュレーションする Linux 
 
 | カーネル | ビルド | テスト |
 |---|---|---|
-| 開発用 6.18（KASAN / lockdep 有効、`scripts/build-kernel.sh`） | `make` | `make test` |
+| 開発用 6.18（KASAN / lockdep / kmemleak / UBSAN 有効、`scripts/build-kernel.sh`） | `make` | `make test` |
 | AlmaLinux 9（5.14.0-*.el9） | `make el9` | `make test-el9` |
 | WSL2（`uname -r` の 6.18.x-microsoft-standard-WSL2） | `make wsl` | `make test-wsl` |
 
