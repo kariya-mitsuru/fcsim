@@ -822,6 +822,8 @@ static int fcsim_eh_abort(struct scsi_cmnd *sc)
 
 	ret = fc_block_scsi_eh(sc);
 	if (ret) {			/* FAST_IO_FAIL */
+		sdev_printk(KERN_INFO, sc->device,
+			    "abort: fast_io_fail_tmo expired, failing the command\n");
 		fcsim_terminate_sc(sc, DID_TRANSPORT_FAILFAST);
 		synchronize_rcu();
 		return ret;
@@ -863,6 +865,9 @@ static int fcsim_eh_block(struct scsi_cmnd *sc, struct fcsim_scope *s)
 	if (ret) {
 		s->host_byte = DID_TRANSPORT_FAILFAST;
 		fcsim_terminate(sc->device->host, s);
+		sdev_printk(KERN_INFO, sc->device,
+			    "reset: fast_io_fail_tmo expired, terminated %u exchange(s)\n",
+			    s->count);
 	}
 	return ret;
 }
