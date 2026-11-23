@@ -59,6 +59,9 @@ TESTS = \
 	"race-deliver tests/race-fcsim.sh deliver" \
 	"race-write-pending tests/race-fcsim.sh write-pending" \
 	"fault tests/fault-fcsim.sh" \
+	"held tests/held-fcsim.sh" \
+	"devloss tests/devloss-fcsim.sh" \
+	"stress tests/stress-fcsim.sh" \
 	"hang tests/hang-fcsim.sh" \
 	"multipath tests/multipath-fcsim.sh" \
 	"multipathd tests/multipathd-fcsim.sh" \

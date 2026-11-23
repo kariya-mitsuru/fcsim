@@ -434,7 +434,7 @@ scripts/build-wsl-kernel.sh 実行中の WSL2 カーネルと同じソース・�
 scripts/wsl-try.sh          実機の WSL2 カーネルで確認を取りながら試す（読み込み → ramdisk の LUN への I/O）
 packaging/                  AlmaLinux 9 向け DKMS RPM の spec と dkms.conf（make rpm）
 build/<release>/            開発用以外のカーネル向けのビルド（make el9 / make wsl / make KVER=...）
-tests/            virtme-ng ゲスト内で実行するテスト（make test の対象は smoke〜fpin の 14 本）
+tests/            virtme-ng ゲスト内で実行するテスト（make test の対象は smoke〜fpin の 17 本）
   lib.sh, guest-setup.sh                     共通の関数、ゲストの準備（D-Bus など）
   kmemleak.sh                                各テストの前後で kmemleak を確かめる（run-guest-test.sh が呼ぶ。
                                              kmemleak の無いカーネルでは何もしない）
@@ -443,6 +443,12 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test の
   race-fcsim.sh {abort,close,deliver,write-pending}
                                              競合の回帰テスト（dbg_* パラメータで窓を広げる、または EH を演じる）
   fault-fcsim.sh                             障害注入（TMR への drop を含む）、fast_io_fail_tmo、RSCN / link イベント（fc-events.py）
+  held-fcsim.sh                              ファブリックが delay で保持中のコマンドの終了（link down、EH abort、
+                                             ルール削除、タイマーとログアウトの競合、host 削除）
+  devloss-fcsim.sh                           dev_loss_tmo の満了（rport が Not Present、sd の削除と再ログインでの復帰、
+                                             blocked 中に積まれた I/O の失敗）
+  stress-fcsim.sh [秒] [種]                  並行 I/O（8 本の dd ワーカーが検証しながら書く）の下で、link・TPG・
+                                             障害ルール・issue_lip・LUN RESET を乱数で繰り返す（既定 60 秒、種を表示）
   hang-fcsim.sh                              バックエンド停止（dmsetup suspend）時の EH とファブリックの応答性
   multipath-fcsim.sh                         2 iport × 2 tport の dm-multipath フェイルオーバとデータ整合性
                                              （dmsetup で直接組んだマップ）
