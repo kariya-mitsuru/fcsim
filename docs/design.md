@@ -301,11 +301,12 @@ LIO の TPG を設定してから `enable` するのと同じく、node_name や
 fc_host の統計（`/sys/class/fc_host/hostN/statistics/`）は iport ごとの per-CPU カウンタから返す。
 `fcp_{input,output,control}_requests`、`fcp_{input,output}_megabytes`、`tx/rx_frames`・`tx/rx_words`
 （フレームサイズ 2048 とフレームのオーバーヘッド 9 ワードで換算）、`link_failure_count`（link down）、
-`lip_count`（issue_lip）、`fcp_packet_aborts`（EH abort）、`dumped_frames`（障害注入で失ったフレーム）、
+`lip_count`（issue_lip）、`fcp_packet_aborts`（SCSI EH がコマンドの abort を試みた回数。既に完了していた、
+ファブリックが保持中だった、FAST_IO_FAIL になったなど、ABTS を送らずに済んだ場合も数える）、`dumped_frames`（障害注入で失ったフレーム）、
 `fc_xid_not_found`（終了済みのエクスチェンジに届いた応答）、`seconds_since_last_reset`。物理層のエラー類は 0。
 `reset_statistics` はその時点の値を基準として記録する。
 障害注入でも FCP_CMND は HBA を出ているので、`error` や `drop=cmd` のコマンドも要求数と `tx_frames` に数える。
-`drop=rsp` で失われた FCP_RSP は `dumped_frames` だけに数え、`rx_frames` には数えない。
+`drop=rsp` で失われた FCP_RSP（TMR の応答を含む）は `dumped_frames` だけに数え、`rx_frames` には数えない。
 
 ### ゾーニング
 
@@ -359,6 +360,9 @@ fc_host の統計（`/sys/class/fc_host/hostN/statistics/`）は iport ごとの
   `statistics/fpin_*` を数え、FC netlink イベント（`FCH_EVT_LINK_FPIN`）として流す
 - LI / PN の port name list には対象ポート自身を入れる（multipathd はこのリストだけを見る。
   カーネルは attached port と同じものを重複して数えない）。detecting port は対象ポートがつながる仮想スイッチのポート
+- 記述子はカーネルの uapi の構造体（`include/uapi/scsi/fc/fc_els.h`）で組む。PN の `struct fc_fn_peer_congn_desc` は
+  `pname_count` の後に 4 バイトの詰め物があり、port name list がオフセット 40 から始まる（FC-LS では 36）。
+  カーネルも multipathd もこの構造体で読むので、それに合わせている（実機の HBA から届く PN とは 4 バイトずれる）
 - multipathd の `marginal_pathgroups fpin` は LI を受けると該当パスを marginal にし（rport の `port_state` を
   `Marginal` に書き換える）、別のパスグループへ移す。そのホストの LINKUP / RSCN で元に戻す
 
@@ -428,13 +432,14 @@ src/
 tools/fcsim-targetcli, fcsim-targetctl, fcsim_rtslib.py   targetcli 連携
 tools/fcsimctl                                            initiator 側・ファブリックの CLI
 scripts/run-guest-test.sh   ゲストでテストを 1 本実行し、出力と dmesg を .test-out/ に残す
+scripts/check.sh            ホスト上の速いチェック（make check: shellcheck、Python の構文、fcsimctl のユニットテスト、checkpatch）
 scripts/vng-run.sh          virtme-ng で開発用カーネル、または KIMG のカーネル（AlmaLinux 9 等）を起動
 scripts/build-kernel.sh     開発用カーネル（KASAN / lockdep / kmemleak / UBSAN / DEBUG_OBJECTS）のビルド
 scripts/build-wsl-kernel.sh 実行中の WSL2 カーネルと同じソース・設定のツリーを取得・ビルド
 scripts/wsl-try.sh          実機の WSL2 カーネルで確認を取りながら試す（読み込み → ramdisk の LUN への I/O）
 packaging/                  AlmaLinux 9 向け DKMS RPM の spec と dkms.conf（make rpm）
 build/<release>/            開発用以外のカーネル向けのビルド（make el9 / make wsl / make KVER=...）
-tests/            virtme-ng ゲスト内で実行するテスト（make test の対象は smoke〜fpin の 17 本）
+tests/            virtme-ng ゲスト内で実行するテスト（make test の対象は smoke〜reload の 20 本）
   lib.sh, guest-setup.sh                     共通の関数、ゲストの準備（D-Bus など）
   kmemleak.sh                                各テストの前後で kmemleak を確かめる（run-guest-test.sh が呼ぶ。
                                              kmemleak の無いカーネルでは何もしない）
@@ -442,7 +447,12 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test の
   smoke-fcsim.sh, smoke-fcsim-targetcli.sh   基本動作、targetcli 連携
   race-fcsim.sh {abort,close,deliver,write-pending}
                                              競合の回帰テスト（dbg_* パラメータで窓を広げる、または EH を演じる）
-  fault-fcsim.sh                             障害注入（TMR への drop を含む）、fast_io_fail_tmo、RSCN / link イベント（fc-events.py）
+  fault-fcsim.sh                             障害注入（TMR への drop、any と特定 target のルールの優先を含む）、
+                                             fast_io_fail_tmo、RSCN / link イベント（fc-events.py）
+  eh-fcsim.sh                                成功する target reset（target 単位の終了）、EH 中の FAST_IO_FAIL
+  scsi-fcsim.sh                              residual、LIO のセンス、ログイン中の LUN マップ変更（UA と issue_lip）、
+                                             LUN 256 以上、TPG 属性（demo_mode_login_only、cache_dynamic_acls、
+                                             demo / prod_mode_write_protect）
   held-fcsim.sh                              ファブリックが delay で保持中のコマンドの終了（link down、EH abort、
                                              ルール削除、タイマーとログアウトの競合、host 削除）
   devloss-fcsim.sh                           dev_loss_tmo の満了（rport が Not Present、sd の削除と再ログインでの復帰、
@@ -457,13 +467,18 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test の
                                              （要 device-mapper-multipath、カーネルに SCSI_DH_ALUA / DM_MULTIPATH_ST）
   misc-fcsim.sh                              拒否ログの抑制、1 ページを超える一覧（fcsimctl status の件数も）、
                                              TPG 属性（store がログインを待つこと）、tmr_timeout の範囲、TPG 名の検証、
-                                             同じ WWPN の initiator / target の同時作成
+                                             同じ WWPN の initiator / target の同時作成、port_id の枯渇（254 個）、
+                                             fcsimctl restore の途中失敗と未知のキーの拒否、WWPN の表記の検証
   cli-fcsim.sh                               fcsimctl（作成・障害ルール・status・save/restore・使い方の誤り・ゾーン名の検査）、
                                              fcsimctl が持つカーネルの既定値・上限の写しとカーネルの一致、
                                              fc_host 統計（障害注入時の数え方を含む）、link up 中の node_name の拒否
   zone-fcsim.sh                              ゾーニング（ステージングと commit、RSCN の宛先、revert、save/restore、
-                                             1 ページを超える active、並行する commit、最大構成）
-  fpin-fcsim.sh                              FPIN の宛先・統計・netlink、multipathd の marginal_pathgroups fpin
+                                             1 ページを超える active、並行する commit、最大構成、書き込み中のパスの消失と復帰、
+                                             link down の initiator に RSCN を送らないこと、members の重複除去）
+  fpin-fcsim.sh                              FPIN の宛先・統計・netlink（ELS のペイロードの各フィールド）、オフラインの
+                                             target ポートについての FPIN、multipathd の marginal_pathgroups fpin
+  reload-fcsim.sh [回数]                     読み込み・使用・取り外しの繰り返し（既定 20 回）、ゾーンが残ると rmmod を拒むこと
+  test_fcsimctl.py                           fcsimctl の純粋な関数のユニットテスト（make check、VM 不要）
   wsl-try-guest.sh                           scripts/wsl-try.sh をゲストの WSL2 カーネルで実行（make test-wsl のみ）
   package-el9.sh                             DKMS RPM のインストール・利用・削除（make test-rpm）
   smoke-nvme-fcloop.sh, smoke-tcm-loop.sh    参考: nvme fcloop と tcm_loop の動作確認（make test には含めない）
