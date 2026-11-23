@@ -44,5 +44,36 @@ sed 's/^/  /' /tmp/try.out
 [ -z "$(leftovers)" ] || fail "$(leftovers)"
 rd_exists && fail "the script's backstore was left behind"
 
+step "a cleanup step that fails: reported, never OK"
+# rmmod as the script sees it: the first call (step 1) works, the second (the
+# cleanup) fails as if udev still held the disk.
+FAKE=$(mktemp -d)
+cat > "$FAKE/rmmod" <<EOF
+#!/bin/bash
+n=\$(cat "$FAKE/n" 2>/dev/null || echo 0); echo \$((n + 1)) > "$FAKE/n"
+[ "\$n" = 0 ] && exec "$(command -v rmmod)" "\$@"
+echo "rmmod: ERROR: Module \$1 is in use (fake)" >&2
+exit 1
+EOF
+chmod +x "$FAKE/rmmod"
+BEFORE=$(tmpdirs)
+if PATH="$FAKE:$PATH" "$TRY" --yes > /tmp/try.out 2>&1; then
+	cat /tmp/try.out; fail "a failed rmmod was not reported"
+fi
+sed 's/^/  /' /tmp/try.out
+grep -q "wsl-try: OK" /tmp/try.out && fail "OK despite the failed rmmod"
+grep -q "cleanup step failed: rmmod" /tmp/try.out || fail "the failed step was not named"
+grep -q "tcm_fcsim is still loaded" /tmp/try.out || fail "the loaded module was not reported"
+grep -q "FAILED" /tmp/try.out || fail "no FAILED at the end"
+[ -d /sys/module/tcm_fcsim ] || fail "the fake rmmod did not keep the module"
+rmmod tcm_fcsim
+rd_exists && fail "the script's backstore was left behind"
+# A failed run keeps its kernel log for the user: ours to remove here.
+for d in $(tmpdirs); do
+	case $BEFORE in *"$d"*) ;; *) rm -rf "$d" ;; esac
+done
+rm -rf "$FAKE"
+[ -z "$(leftovers)" ] || fail "$(leftovers)"
+
 echo
 echo "PASS"

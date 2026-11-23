@@ -74,16 +74,38 @@ cleanup() {
 	local rc=$?
 	trap - EXIT
 	set +e
+	# A step of the cleanup that fails is a failed run: what it was meant to
+	# remove is still there.
+	undo() {
+		"$@" && return 0
+		echo "wsl-try: cleanup step failed: $*" >&2
+		rc=1
+		return 1
+	}
 	if [ $CREATED = 1 ]; then
 		say "cleanup"
-		[ -d "/sys/kernel/config/fcsim/hosts/$I" ] && "$CTL" host delete "$I"
-		[ -d "/sys/kernel/config/target/fcsim/$T" ] && "$TCLI" /fcsim delete "$(naa $T)" >/dev/null
-		[ $RD_CREATED = 1 ] && "$TCLI" /backstores/ramdisk delete "$RD" >/dev/null
-		rmdir /sys/kernel/config/target/fcsim 2>/dev/null
+		[ -d "/sys/kernel/config/fcsim/hosts/$I" ] && undo "$CTL" host delete "$I"
+		[ -d "/sys/kernel/config/target/fcsim/$T" ] &&
+			undo "$TCLI" /fcsim delete "$(naa $T)" >/dev/null
+		[ $RD_CREATED = 1 ] && undo "$TCLI" /backstores/ramdisk delete "$RD" >/dev/null
+		[ -d /sys/kernel/config/target/fcsim ] &&
+			undo rmdir /sys/kernel/config/target/fcsim
 	fi
 	if [ $LOADED = 1 ]; then
-		rmmod tcm_fcsim && echo "tcm_fcsim unloaded"
+		# udev may still hold the disk that went away a moment ago.
+		udevadm settle 2>/dev/null
+		undo rmmod tcm_fcsim && echo "tcm_fcsim unloaded"
 	fi
+	# Whatever the steps above said: nothing of ours may be left.
+	if [ -d /sys/module/tcm_fcsim ]; then
+		echo "wsl-try: tcm_fcsim is still loaded" >&2
+		rc=1
+	fi
+	for d in /sys/kernel/config/target/core/rd_mcp_*/"$RD"; do
+		[ $RD_CREATED = 1 ] && [ -e "$d" ] || continue
+		echo "wsl-try: the ramdisk backstore is still there ($d)" >&2
+		rc=1
+	done
 	echo
 	rm -f "$WORK/pattern" "$WORK/readback"
 	dmesg | awk -v m="$MARK" 'seen || index($0, m) { seen = 1; print }' > "$WORK/dmesg"
