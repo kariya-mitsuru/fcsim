@@ -59,7 +59,7 @@ ZONING = CFS + "/zoning"
 ZONES = CFS + "/zones"
 LIO_FABRIC = "/sys/kernel/config/target/fcsim"
 # These mirror the kernel; keep them in step (tests/cli-fcsim.sh checks the
-# limits against it).  src/fcsim_fault.c: defaults in fcsim_faults_make_rule,
+# limits against it).  src/fcsim_fault.c: defaults in fcsim_faults_make_group,
 # fcsim_drop_names, fcsim_error_names, FCSIM_FAULT_MAX_DELAY_MS and the
 # probability / count stores.  src/fcsim_zone.c: FCSIM_ZONE_MAX_*.
 FAULT_ATTRS = ("delay_ms", "drop", "error", "probability", "count")
@@ -387,6 +387,11 @@ def fault_set(hdir, target, attrs):
     else:
         old = {k: read(os.path.join(fd, k)) for k in FAULT_ATTRS}
     try:
+        # What is left of count goes back in at the end: read it right before
+        # holding the rule off, so that commands the rule caught meanwhile
+        # are not given back.
+        if not created:
+            old["count"] = read(os.path.join(fd, "count"))
         write(os.path.join(fd, "count"), "0")
         for k in FAULT_GATED:
             if k in attrs:
@@ -623,11 +628,21 @@ def restore_plan(cfg):
             raise Error("%s: expected %s, got %r" % (what, typ.__name__, value))
         return value
 
+    def known(what, d, keys):
+        # A misspelt key would otherwise vanish without a trace.
+        extra = sorted(set(d) - set(keys))
+        if extra:
+            raise Error("%s: unknown key%s %s (known: %s)" % (
+                what, "s" if len(extra) > 1 else "", ", ".join(map(repr, extra)),
+                ", ".join(keys)))
+
     expect("config", cfg, dict)
+    known("config", cfg, ("version", "zoning", "hosts"))
     if cfg.get("version") != SAVE_VERSION:
         raise Error("unsupported config version: %r" % cfg.get("version"))
 
     z = expect("zoning", cfg.get("zoning", {}), dict)
+    known("zoning", z, ("mode", "zones"))
     mode = z.get("mode", "off")
     if mode not in ("on", "off"):
         raise Error("zoning mode: on|off, not %r" % (mode,))
@@ -656,6 +671,7 @@ def restore_plan(cfg):
     for h in expect("hosts", cfg.get("hosts", []), list):
         expect("host", h, dict)
         w = wwn(expect("host wwpn", h.get("wwpn"), str))
+        known("host %s" % w, h, ("wwpn", "wwnn", "link", "faults"))
         if w in seen:
             raise Error("host %s: listed twice" % w)
         if w in tports:
@@ -670,6 +686,7 @@ def restore_plan(cfg):
         for f in expect("host %s faults" % w, h.get("faults", []), list):
             expect("host %s fault" % w, f, dict)
             t = rule_name(expect("host %s fault target" % w, f.get("target"), str))
+            known("host %s fault %s" % (w, t), f, ("target",) + FAULT_ATTRS)
             if t in targets:
                 raise Error("host %s: two fault rules for %s" % (w, t))
             targets.add(t)
