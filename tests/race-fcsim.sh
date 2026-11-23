@@ -93,9 +93,14 @@ close)
 	rmdir "$TPG/acls/$IWWPN/lun_0"
 	rmdir "$TPG/acls/$IWWPN" &
 	RMDIR=$!
-	sleep 0.5	# rmdir is now sleeping inside close_session
+	wait_for 5 sh -c "dmesg | grep -q 'dbg: close_session sleeps'" ||
+		fail "close_session was not called"
 	echo down > "$HOSTS/$IWWPN/link"	# reconcile logs the session out
 	wait $RMDIR || fail "ACL rmdir failed"
+	# The logout must have found close_session in flight and waited for it;
+	# otherwise the window was missed and nothing was tested.
+	wait_for 5 sh -c "dmesg | grep -q 'dbg: logout waits for close_session'" ||
+		fail "race window not hit (the logout did not wait for close_session)"
 	echo 0 > "$PARAM/dbg_close_delay_ms"
 	echo up > "$HOSTS/$IWWPN/link"
 	[ "$(cat "$TPG/sessions")" = "$IWWPN" ] || fail "no relogin after link up"

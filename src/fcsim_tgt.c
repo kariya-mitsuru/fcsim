@@ -97,8 +97,11 @@ void fcsim_tgt_logout(struct fcsim_nexus *nexus)
 	target_stop_session(se_sess);
 	close_in_flight = list_empty(&se_sess->sess_acl_list);
 	spin_unlock_irqrestore(&nacl->nacl_sess_lock, flags);
-	if (close_in_flight)
+	if (close_in_flight) {
+		if (READ_ONCE(dbg_close_delay_ms))	/* tests/race-fcsim.sh close */
+			pr_info("dbg: logout waits for close_session\n");
 		wait_for_completion(&nexus->close_done);
+	}
 
 	target_wait_for_sess_cmds(se_sess);
 	target_remove_session(se_sess);
@@ -111,8 +114,10 @@ static void fcsim_close_session(struct se_session *se_sess)
 	struct fcsim_nexus *nexus;
 	unsigned int delay = READ_ONCE(dbg_close_delay_ms);
 
-	if (delay)
+	if (delay) {
+		pr_info("dbg: close_session sleeps %u ms\n", delay);
 		msleep(delay);
+	}
 
 	nexus = se_sess->fabric_sess_ptr;
 	WRITE_ONCE(nexus->closing, true);
