@@ -12,17 +12,23 @@
 #                         between target_init_cmd() and the hand-over to
 #                         LIO: it must never reach the target, and its
 #                         session command reference must be dropped
+#   race-fcsim.sh write-pending
+#                         a WRITE terminated (DID_ABORT) when LIO asks for
+#                         its data: LIO fails the command from inside
+#                         write_pending, nothing is written, the status
+#                         goes nowhere and the session still drains
 #
 # They use the test-only module parameters dbg_release_delay_ms and
-# dbg_close_delay_ms, which widen the windows, and dbg_deliver_terminate,
-# which terminates the next TEST UNIT READY right inside the window.  Run
-# each scenario in its own guest: a regression may crash the kernel.
+# dbg_close_delay_ms, which widen the windows, and dbg_deliver_terminate /
+# dbg_write_pending_terminate, which terminate the next command right inside
+# the window.  Run each scenario in its own guest: a regression may crash
+# the kernel.
 set -euo pipefail
 
 TOP=$(cd "$(dirname "$0")/.." && pwd)
 . "$TOP/tests/lib.sh"
 
-SCENARIO=${1:?usage: $0 abort|close|deliver}
+SCENARIO=${1:?usage: $0 abort|close|deliver|write-pending}
 TWWPN=21:00:00:00:00:00:00:01
 IWWPN=10:00:00:00:c9:00:00:01
 TPG=$LIO/fcsim/$TWWPN/tpgt_1
@@ -117,6 +123,39 @@ deliver)
 	# A leaked session command reference would hang the drain at teardown.
 	splat_check
 	echo "OK: the terminated command was dropped before LIO"
+	;;
+write-pending)
+	step "write-pending: WRITE terminated when LIO asks for its data"
+	XNF=/sys/class/fc_host/$HOST/statistics/fc_xid_not_found
+	LBA=32		# 0x20 in the CDB below
+	head -c 512 /dev/urandom > /tmp/old
+	head -c 512 /dev/urandom > /tmp/new
+	dd if=/tmp/old of="$DISK" bs=512 seek=$LBA oflag=direct status=none
+	udevadm settle	# the udev probe after the write must be over
+	before=$(hexval "$XNF")
+	echo 1 > "$PARAM/dbg_write_pending_terminate"	# one-shot, WRITE(10)/(16)
+	# WRITE(10) of one block at LBA 32.  SG_IO does not retry; read-only
+	# open as in "deliver" (root may send any command on it).
+	wr10() { sg_raw -R -s 512 -i "$1" "$DISK" 2a 00 00 00 00 20 00 00 01 00; }
+	if wr10 /tmp/new >/tmp/wr.out 2>&1; then
+		cat /tmp/wr.out
+		fail "the terminated WRITE succeeded"
+	fi
+	sed 's/^/  sg_raw: /' /tmp/wr.out
+	dmesg | grep -q 'dbg: terminating WRITE before write_pending' || fail "the knob did not fire"
+	dd if="$DISK" of=/tmp/rd bs=512 skip=$LBA count=1 iflag=direct status=none ||
+		fail "READ afterwards"
+	cmp -s /tmp/old /tmp/rd || fail "the terminated WRITE reached the backstore"
+	after=$(hexval "$XNF")
+	echo "fc_xid_not_found: before $before, after $after"
+	# LIO's CHECK CONDITION for the failed WRITE found no exchange to go to.
+	[ "$after" -gt "$before" ] || fail "no status sent for the failed WRITE"
+	wr10 /tmp/new >/dev/null 2>&1 || fail "a WRITE afterwards failed"
+	dd if="$DISK" of=/tmp/rd bs=512 skip=$LBA count=1 iflag=direct status=none
+	cmp -s /tmp/new /tmp/rd || fail "the WRITE afterwards was not stored"
+	# A leaked session command reference would hang the drain at teardown.
+	splat_check
+	echo "OK: the WRITE failed without touching the backstore"
 	;;
 *)
 	fail "unknown scenario $SCENARIO"

@@ -370,12 +370,40 @@ void fcsim_terminate_tport(struct fcsim_iport *iport, u64 tport_wwpn)
 
 /* ------------------------------------------------------------- LIO hooks */
 
+/*
+ * Test-only knob (tests/race-fcsim.sh write-pending): the next WRITE(10) or
+ * WRITE(16) is terminated, as by an EH abort, when LIO asks for its data, so
+ * that write_pending finds the exchange gone.  Off by default.
+ */
+static bool dbg_write_pending_terminate;
+module_param(dbg_write_pending_terminate, bool, 0644);
+MODULE_PARM_DESC(dbg_write_pending_terminate,
+		 "test only: terminate the next WRITE(10)/WRITE(16) when LIO asks for its data (one-shot)");
+
+static void fcsim_dbg_write_pending_terminate(struct fcsim_cmd *cmd)
+{
+	unsigned long flags;
+
+	if (likely(!READ_ONCE(dbg_write_pending_terminate)) ||
+	    (cmd->cdb[0] != WRITE_10 && cmd->cdb[0] != WRITE_16) ||
+	    !xchg(&dbg_write_pending_terminate, false))
+		return;
+	pr_info("dbg: terminating WRITE before write_pending fetches its data\n");
+	spin_lock_irqsave(&cmd->lock, flags);
+	if (cmd->sc)
+		fcsim_xchg_finish(cmd, flags, DID_ABORT);
+	else
+		spin_unlock_irqrestore(&cmd->lock, flags);
+}
+
 /* write_pending: fetch the WRITE data.  False if the exchange is gone. */
 bool fcsim_xchg_fetch_write_data(struct fcsim_cmd *cmd)
 {
 	struct se_cmd *se_cmd = &cmd->se_cmd;
 	unsigned long flags;
 	bool ok = false;
+
+	fcsim_dbg_write_pending_terminate(cmd);
 
 	spin_lock_irqsave(&cmd->lock, flags);
 	if (cmd->sc) {

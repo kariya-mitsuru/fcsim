@@ -57,6 +57,7 @@ TESTS = \
 	"race-abort tests/race-fcsim.sh abort" \
 	"race-close tests/race-fcsim.sh close" \
 	"race-deliver tests/race-fcsim.sh deliver" \
+	"race-write-pending tests/race-fcsim.sh write-pending" \
 	"fault tests/fault-fcsim.sh" \
 	"hang tests/hang-fcsim.sh" \
 	"multipath tests/multipath-fcsim.sh" \

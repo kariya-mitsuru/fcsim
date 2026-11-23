@@ -390,6 +390,7 @@ WWPN は `10:00:...`、`naa.1000...`、`0x1000...`、`1000...` のいずれで�
 | `dbg_release_delay_ms` | 0 | テスト専用: 次の READ の解放を遅らせる（1 回限り） |
 | `dbg_close_delay_ms` | 0 | テスト専用: `close_session` の先頭で眠る |
 | `dbg_deliver_terminate` | N | テスト専用: 次の TEST UNIT READY を `target_init_cmd()` の直後に EH abort 相当（`DID_ABORT`）で終了する（1 回限り） |
+| `dbg_write_pending_terminate` | N | テスト専用: 次の WRITE(10) / WRITE(16) を、LIO がデータを求めた（`write_pending`）ところで EH abort 相当で終了する（1 回限り） |
 | `dbg_commit_delay_ms` | 0 | テスト専用: 次のゾーニングの commit で、スナップショットを取ってから有効にするまで眠る（1 回限り） |
 
 値が上限を超えたときのエラーは属性によって違う: 数値の範囲外は ERANGE（`tmr_timeout`、障害ルールの
@@ -428,13 +429,14 @@ scripts/build-wsl-kernel.sh 実行中の WSL2 カーネルと同じソース・�
 scripts/wsl-try.sh          実機の WSL2 カーネルで確認を取りながら試す（読み込み → ramdisk の LUN への I/O）
 packaging/                  AlmaLinux 9 向け DKMS RPM の spec と dkms.conf（make rpm）
 build/<release>/            開発用以外のカーネル向けのビルド（make el9 / make wsl / make KVER=...）
-tests/            virtme-ng ゲスト内で実行するテスト（make test の対象は smoke〜fpin の 13 本）
+tests/            virtme-ng ゲスト内で実行するテスト（make test の対象は smoke〜fpin の 14 本）
   lib.sh, guest-setup.sh                     共通の関数、ゲストの準備（D-Bus など）
   kmemleak.sh                                各テストの前後で kmemleak を確かめる（run-guest-test.sh が呼ぶ。
                                              kmemleak の無いカーネルでは何もしない）
   fc-events.py                               FC transport の netlink イベントを表示する
   smoke-fcsim.sh, smoke-fcsim-targetcli.sh   基本動作、targetcli 連携
-  race-fcsim.sh {abort,close,deliver}        競合の回帰テスト（dbg_* パラメータで窓を広げる、または EH を演じる）
+  race-fcsim.sh {abort,close,deliver,write-pending}
+                                             競合の回帰テスト（dbg_* パラメータで窓を広げる、または EH を演じる）
   fault-fcsim.sh                             障害注入、fast_io_fail_tmo、RSCN / link イベント（fc-events.py）
   hang-fcsim.sh                              バックエンド停止（dmsetup suspend）時の EH とファブリックの応答性
   multipath-fcsim.sh                         2 iport × 2 tport の dm-multipath フェイルオーバとデータ整合性
