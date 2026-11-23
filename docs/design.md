@@ -463,7 +463,8 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test の
   multipath-fcsim.sh                         2 iport × 2 tport の dm-multipath フェイルオーバとデータ整合性
                                              （dmsetup で直接組んだマップ）
   multipathd-fcsim.sh                        multipathd（ALUA・service-time）: rport の fast_io_fail_tmo /
-                                             dev_loss_tmo 設定、パスの自動復帰、全パスダウン時のキューイング
+                                             dev_loss_tmo 設定、パスの自動復帰、全パスダウン時のキューイング、
+                                             ゾーン変更で外れたパスの失敗・dev_loss_tmo での削除・再追加
                                              （要 device-mapper-multipath、カーネルに SCSI_DH_ALUA / DM_MULTIPATH_ST）
   misc-fcsim.sh                              拒否ログの抑制、1 ページを超える一覧（fcsimctl status の件数も）、
                                              TPG 属性（store がログインを待つこと）、tmr_timeout の範囲、TPG 名の検証、
@@ -487,8 +488,6 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test の
 テストの出力とゲストの dmesg は `.test-out/<名前>[-<TEST_TAG>].{log,dmesg}` に残る。各テストはゲスト内で
 `TEST_TIMEOUT` 秒（既定 300）で打ち切り、その場合も dmesg を保存する。kmemleak のあるカーネル（開発用）では、
 テスト中に漏れたメモリがあればテストは失敗する（`tests/kmemleak.sh`、起動時の漏れは数えない）。
-
-未実装のテスト: ゾーン変更で rport・パス数が変わったときの multipathd の追従（stage3-plan.md の 3b で予定していたもの）。
 
 ## 7. 段階
 

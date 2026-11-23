@@ -7,6 +7,9 @@
 # multipathd builds an ALUA map, tunes the FC rports (fast_io_fail_tmo /
 # dev_loss_tmo through fc_remote_ports), fails and reinstates paths by
 # itself, and queues I/O while all paths are down for up to no_path_retry.
+# A path zoned out fails at once, leaves the map at dev_loss_tmo and joins
+# it again when zoned back in; zoned back earlier, the same disk is
+# reinstated.
 set -euo pipefail
 
 TOP=$(cd "$(dirname "$0")/.." && pwd)
@@ -121,6 +124,66 @@ echo up > "$HOSTS/$I1/link"; echo up > "$HOSTS/$I2/link"
 wait_mp_active 4 30 || fail "paths not reinstated: $(paths_state)"
 cmp /tmp/pat $DEV || fail "data mismatch after recovery"
 echo "  recovered: $(paths_state)"
+splat_check
+
+step "zoning: a path zoned out fails, goes at dev_loss_tmo and comes back as a new disk"
+CTL=$TOP/tools/fcsimctl
+mp_paths() { multipathd show paths raw format '%d' | grep -c .; }
+i2t2() {	# sdX of the path I2 -> T2
+	local b
+	for b in /sys/class/scsi_host/"$(host_of $I2)"/device/"$(rport_of "$(host_of $I2)" $T2)"/target*/*/block/*; do
+		[ -e "$b" ] && echo "${b##*/}"
+	done
+}
+$CTL zone create zA $I1 $I2 $T1
+$CTL zone create zB $I1 $I2 $T2
+$CTL zone mode on
+$CTL zone commit
+sleep 2
+wait_mp_active 4 10 || fail "zoning that keeps every path lost one: $(paths_state)"
+OLD=$(i2t2)
+writer_start $DEV $SIZE_MB
+sleep 1
+t0=$(date +%s)
+$CTL zone remove zB $I2
+$CTL zone commit
+wait_mp_active 3 10 || { touch /tmp/stop; fail "zoned-out path not failed: $(paths_state)"; }
+[ "$(mp_paths)" = 4 ] || { touch /tmp/stop; fail "path removed before dev_loss_tmo"; }
+echo "  zoned out:  $(paths_state) ($OLD failed, still in the map)"
+wait_for 50 sh -c "[ \$(multipathd show paths raw format '%d' | grep -c .) = 3 ]" ||
+	{ touch /tmp/stop; fail "path not removed: $(paths_state)"; }
+t=$(( $(date +%s) - t0 ))
+[ $t -ge 30 ] || { touch /tmp/stop; fail "path removed after ${t}s, dev_loss_tmo is 30"; }
+[ -z "$(i2t2)" ] || { touch /tmp/stop; fail "disk still there"; }
+echo "  dev_loss:   $(paths_state) after ${t}s, $OLD gone"
+$CTL zone add zB $I2
+$CTL zone commit
+wait_mp_active 4 30 || { touch /tmp/stop; fail "zoned-in path not added: $(paths_state)"; }
+NEW=$(i2t2)
+echo "  zoned in:   $(paths_state) ($NEW added)"
+writer_stop
+cmp /tmp/pat $DEV || fail "data mismatch"
+echo "  data intact"
+
+step "zoning: back before dev_loss_tmo, the same disk is reinstated"
+writer_start $DEV $SIZE_MB
+sleep 1
+$CTL zone remove zB $I2
+$CTL zone commit
+wait_mp_active 3 10 || { touch /tmp/stop; fail "zoned-out path not failed: $(paths_state)"; }
+$CTL zone add zB $I2
+$CTL zone commit
+wait_mp_active 4 30 || { touch /tmp/stop; fail "path not reinstated: $(paths_state)"; }
+[ "$(i2t2)" = "$NEW" ] && [ "$(mp_paths)" = 4 ] ||
+	{ touch /tmp/stop; fail "expected $NEW reinstated, have $(i2t2), $(mp_paths) paths"; }
+echo "  reinstated: $(paths_state) ($NEW)"
+writer_stop
+cmp /tmp/pat $DEV || fail "data mismatch"
+echo "  data intact"
+$CTL zone mode off
+$CTL zone delete zA
+$CTL zone delete zB
+$CTL zone commit
 splat_check
 
 step "teardown"

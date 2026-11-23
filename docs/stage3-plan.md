@@ -95,7 +95,7 @@
   ゾーン変更で外れた組はログアウトし（rport の dev_loss 開始）、入った組はログインする。
   実機のスイッチと同様、影響を受けたポートに RSCN を送る
 - テスト: 2 × 2 構成で、ゾーンの付け外しに応じて rport とパス数が変わること。multipathd のパス数の追従
-  （実施結果: `tests/zone-fcsim.sh` はログイン先と RSCN の宛先を確かめる。multipathd のパス数の追従のテストは未実装）
+  （実施結果: `tests/zone-fcsim.sh` はログイン先と RSCN の宛先を確かめる。multipathd の追従は `tests/multipathd-fcsim.sh` が確かめる: 外れたパスは failed、dev_loss_tmo で削除、戻すと再追加）
 
 ### D. NPIV
 
