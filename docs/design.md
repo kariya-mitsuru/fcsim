@@ -392,7 +392,7 @@ WWPN は `10:00:...`、`naa.1000...`、`0x1000...`、`1000...` のいずれで�
 | 名前 | 既定 | 意味 |
 |---|---|---|
 | `tmr_timeout` | 10 | EH が TMR の応答を待つ秒数（1〜3600。範囲外は ERANGE） |
-| `dbg_release_delay_ms` | 0 | テスト専用: 次の READ の解放を遅らせる（1 回限り） |
+| `dbg_release_delay_ms` | 0 | テスト専用: 次の READ(10) / READ(16) の解放を遅らせる（1 回限り） |
 | `dbg_close_delay_ms` | 0 | テスト専用: `close_session` の先頭で眠る |
 | `dbg_deliver_terminate` | N | テスト専用: 次の TEST UNIT READY を `target_init_cmd()` の直後に EH abort 相当（`DID_ABORT`）で終了する（1 回限り） |
 | `dbg_write_pending_terminate` | N | テスト専用: 次の WRITE(10) / WRITE(16) を、LIO がデータを求めた（`write_pending`）ところで EH abort 相当で終了する（1 回限り） |
