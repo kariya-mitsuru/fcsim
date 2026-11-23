@@ -475,7 +475,9 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test の
 - バックエンドで止まったコマンドは LIO から取り戻せない。initiator 側は EH で終了できるが、
   そのセッションの drain・TPG 削除・host 削除・その組の再ログインはバックエンドが戻るまで待つ
 - reconcile は単一の ordered workqueue で、`fc_remote_port_add` はホストの scan work を flush する。
-  EH 中のホストで scan が保留されているとき、そのホストへのログインが EH 終了まで待たされ、その間 reconcile 全体が止まる可能性がある
+  EH 中のホストで scan が保留されているとき、そのホストへのログインが EH 終了まで待たされ、その間 reconcile 全体が止まる可能性がある。
+  FC transport の workqueue が `WQ_MEM_RECLAIM` でないため、reconcile の workqueue も `WQ_MEM_RECLAIM` にしない
+  （メモリ逼迫時の前進は保証しない）
 - データは LIO のバッファとの間でコピーする（pass-through しない）分、tcm_loop より CPU を使う
 - T10-PI（DIF/DIX）は非対応
 - LUN マップ変更時の自動再スキャンはしない（実機同様、LIO が REPORTED LUNS DATA HAS CHANGED の UA を返すのみ）。

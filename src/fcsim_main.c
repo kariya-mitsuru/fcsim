@@ -477,7 +477,13 @@ static int __init fcsim_init(void)
 {
 	int ret;
 
-	fcsim_wq = alloc_ordered_workqueue("fcsim_fabric", WQ_MEM_RECLAIM);
+	/*
+	 * No WQ_MEM_RECLAIM: reconcile calls fc_remote_port_add/delete, which
+	 * flush the FC transport's own work queues, and those are not
+	 * WQ_MEM_RECLAIM either (check_flush_dependency warns, e.g. when a
+	 * "Not Present" rport comes back after dev_loss_tmo).
+	 */
+	fcsim_wq = alloc_ordered_workqueue("fcsim_fabric", 0);
 	if (!fcsim_wq)
 		return -ENOMEM;
 	fcsim_drain_wq = alloc_workqueue("fcsim_drain",
