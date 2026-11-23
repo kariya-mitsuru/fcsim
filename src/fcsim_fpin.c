@@ -112,6 +112,16 @@ static int fcsim_fpin_lookup(const struct fcsim_fpin_name *t, const char *s,
 	return -EINVAL;
 }
 
+/* The next word of @line (runs of blanks separate words), or NULL. */
+static char *fcsim_fpin_word(char **line)
+{
+	char *tok;
+
+	while ((tok = strsep(line, " \t\n")) && !*tok)
+		;
+	return tok;
+}
+
 static int fcsim_fpin_parse(char *line, struct fcsim_fpin_req *r)
 {
 	const struct fcsim_fpin_name *events;
@@ -119,8 +129,8 @@ static int fcsim_fpin_parse(char *line, struct fcsim_fpin_req *r)
 	unsigned int k;
 	int ret;
 
-	kind = strsep(&line, " \t\n");
-	wwpn = strsep(&line, " \t\n");
+	kind = fcsim_fpin_word(&line);
+	wwpn = fcsim_fpin_word(&line);
 	if (!kind || !wwpn)
 		return -EINVAL;
 
@@ -142,11 +152,9 @@ static int fcsim_fpin_parse(char *line, struct fcsim_fpin_req *r)
 	if (ret)
 		return ret;
 
-	while ((tok = strsep(&line, " \t\n"))) {
+	while ((tok = fcsim_fpin_word(&line))) {
 		char *val;
 
-		if (!*tok)
-			continue;
 		val = strchr(tok, '=');
 		if (!val) {
 			if (fcsim_fpin_lookup(events, tok, &r->event))

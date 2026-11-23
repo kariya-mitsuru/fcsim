@@ -18,7 +18,7 @@ I1=10:00:00:00:c9:00:00:01
 I2=10:00:00:00:c9:00:00:02
 SIZE_MB=32
 
-rstat() { hexval /sys/class/fc_remote_ports/$(rport_of $1 $2)/statistics/$3; }	# rstat <host> <target> <stat>
+rstat() { hexval "/sys/class/fc_remote_ports/$(rport_of "$1" "$2")/statistics/$3"; }	# rstat <host> <target> <stat>
 hstat() { hexval /sys/class/fc_host/$1/statistics/$2; }
 
 step "setup: one ramdisk behind T1 and T2, initiators I1 and I2"
@@ -41,6 +41,17 @@ $CTL fpin li $T1 loss_of_sync count=5
 wait $EV
 grep LINK_FPIN /tmp/ev | sed 's/^/  /'
 [ "$(grep -c LINK_FPIN /tmp/ev)" = 2 ] || fail "expected 2 FPIN events"
+# The payload: the descriptor fields as given (threshold: the default).
+for h in $H1 $H2; do
+	l=$(grep "^$h LINK_FPIN" /tmp/ev) || fail "$h: no FPIN event"
+	case $l in
+	*" li type=2 detecting=20:"*" attached=$T1 threshold=1000 count=5 pnames=$T1") ;;
+	*) fail "$h: wrong LI payload: $l" ;;
+	esac
+	det=${l#* detecting=}; det=${det%% *}
+	[ "$det" != "$T1" ] || fail "$h: detecting port is the attached port"
+done
+echo "  LI payload ok"
 for h in $H1 $H2; do
 	[ "$(rstat $h $T1 fpin_li)" = 1 ] && [ "$(rstat $h $T1 fpin_li_loss_of_sync_count)" = 1 ] \
 		|| fail "$h: T1 rport fpin_li"
@@ -62,6 +73,7 @@ $CTL zone commit
 wait_paths 4 || fail "paths not back after zoning off"
 
 step "1. other FPINs"
+start_events 4 /tmp/ev2
 $CTL fpin cn $I1 credit_stall severity=error
 [ "$(hstat $H1 fpin_cn)" = 1 ] && [ "$(hstat $H1 fpin_cn_credit_stall)" = 1 ] || fail "cn not counted on $H1"
 [ "$(hstat $H2 fpin_cn)" = 0 ] || fail "cn about I1 reached $H2"
@@ -71,7 +83,23 @@ $CTL fpin dn $T2 unable_to_route
 [ "$(rstat $H1 $T2 fpin_dn)" = 1 ] && [ "$(rstat $H1 $T2 fpin_dn_unable_to_route)" = 1 ] || fail "dn"
 $CTL fpin pn $T2 oversubscription
 [ "$(rstat $H1 $T2 fpin_cn)" = 1 ] && [ "$(rstat $H1 $T2 fpin_cn_oversubscription)" = 1 ] || fail "pn"
-echo "  cn / li (own link) / dn / pn ok"
+wait $EV
+grep LINK_FPIN /tmp/ev2 | sed 's/^/  /'
+grep -q "^$H1 LINK_FPIN .* cn type=2 period=1000 severity=0xf7$" /tmp/ev2 || fail "cn payload"
+grep -q "^$H2 LINK_FPIN .* li type=6 detecting=20:.* attached=$I2 threshold=1000 count=1 pnames=$I2$" /tmp/ev2 ||
+	fail "li (own link) payload"
+grep -q "^$H1 LINK_FPIN .* dn reason=2 detecting=20:.* attached=$T2$" /tmp/ev2 || fail "dn payload"
+grep -q "^$H1 LINK_FPIN .* pn type=3 detecting=20:.* attached=$T2 period=1000 pnames=$T2$" /tmp/ev2 ||
+	fail "pn payload"
+echo "  cn / li (own link) / dn / pn ok, payloads too"
+
+step "1. an FPIN about a target port that is offline still goes out"
+echo 0 > "$LIO/fcsim/$T2/tpgt_1/enable"
+$CTL fpin li $T2 link_failure
+dmesg | grep "FPIN li about $T2" | tail -1 | sed 's/^/  /'
+dmesg | grep "FPIN li about $T2" | tail -1 | grep -q "sent to 2 port" || fail "LI about the offline T2"
+echo 1 > "$LIO/fcsim/$T2/tpgt_1/enable"
+wait_paths 4 || fail "paths not back after T2 came back"
 
 step "1. invalid requests"
 F=/sys/kernel/config/fcsim/fpin
@@ -79,6 +107,9 @@ for bad in "xx $T1" "li 12:34" "li 21:00:00:00:00:00:00:99" "li $T1 bogus" "li $
 	if echo "$bad" > $F 2>/dev/null; then fail "accepted: $bad"; fi
 done
 echo "  rejected as expected"
+# Blanks around and between the words do not matter.
+echo "   dn   $T2	  unable_to_route  " > $F || fail "an FPIN request with extra blanks was refused"
+echo "  extra blanks accepted"
 splat_check
 
 # ---------------------------------------------------------------------------
@@ -99,11 +130,10 @@ multipath -ll "$MAP" | sed 's/^/  /'
 # the sd devices behind T1 / T2
 T1DEVS=""; T2DEVS=""
 for h in $H1 $H2; do
-	for t in T1 T2; do
-		eval w=\$$t
-		d=$(ls /sys/class/scsi_host/$h/device/$(rport_of $h $w)/target*/*/block/)
-		eval ${t}DEVS=\"\$${t}DEVS $d\"
-	done
+	d=$(ls /sys/class/scsi_host/"$h"/device/"$(rport_of "$h" $T1)"/target*/*/block/)
+	T1DEVS="$T1DEVS $d"
+	d=$(ls /sys/class/scsi_host/"$h"/device/"$(rport_of "$h" $T2)"/target*/*/block/)
+	T2DEVS="$T2DEVS $d"
 done
 echo "  via T1:$T1DEVS   via T2:$T2DEVS"
 ios() { local n=0 d; for d in "$@"; do n=$((n + $(awk '{print $1 + $5}' /sys/block/$d/stat))); done; echo $n; }
@@ -135,7 +165,7 @@ step "2. LINKUP clears the marginal state"
 for i in $I1 $I2; do $CTL link $i down; $CTL link $i up; done
 for h in $H1 $H2; do
 	wait_for 20 sh -c "[ \$(cat /sys/class/fc_remote_ports/$(rport_of $h $T1)/port_state) = Online ]" \
-		|| fail "$h: T1 rport still $(cat /sys/class/fc_remote_ports/$(rport_of $h $T1)/port_state)"
+		|| fail "$h: T1 rport still $(cat "/sys/class/fc_remote_ports/$(rport_of "$h" $T1)/port_state")"
 done
 wait_for 30 sh -c "[ \$(multipath -ll $MAP | grep -c 'policy=') = 1 ]" && wait_mp_active 4 30 \
 	|| { multipath -ll "$MAP"; fail "paths not back in one group"; }
