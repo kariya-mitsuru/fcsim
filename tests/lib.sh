@@ -5,6 +5,7 @@
 
 LIO=/sys/kernel/config/target
 HOSTS=/sys/kernel/config/fcsim/hosts
+# shellcheck disable=SC2034 # used by the tests that source this file
 PARAM=/sys/module/tcm_fcsim/parameters
 TCLI="$TOP/tools/fcsim-targetcli"
 
@@ -30,6 +31,7 @@ hexval() {
 # background (pid in EV); returns once the listener is bound.
 start_events() {
 	python3 "$TOP/tests/fc-events.py" "$1" > "$2" &
+	# shellcheck disable=SC2034 # the caller waits for it
 	EV=$!
 	wait_for 10 grep -q '^listening' "$2" || fail "fc-events.py did not start"
 }
@@ -91,8 +93,8 @@ wait_paths() {
 rport_of() {	# rport_of <hostN> <target wwpn> -> rport-X:Y-Z
 	local rp
 	for rp in /sys/class/scsi_host/$1/device/rport-*; do
-		[ "$(cat /sys/class/fc_remote_ports/$(basename $rp)/port_name)" = "0x${2//:/}" ] &&
-			{ basename $rp; return 0; }
+		[ "$(cat "/sys/class/fc_remote_ports/${rp##*/}/port_name")" = "0x${2//:/}" ] &&
+			{ echo "${rp##*/}"; return 0; }
 	done
 	return 1
 }
@@ -153,6 +155,7 @@ start_multipathd() {
 	MPD_PID=$!
 	wait_for 20 sh -c "multipathd show maps raw format '%n' 2>/dev/null | grep -q ." \
 		|| { tail -30 /tmp/multipathd.log; fail "multipathd built no map"; }
+	# shellcheck disable=SC2034 # the multipath map, for the caller
 	MAP=$(multipathd show maps raw format '%n' | head -1)
 	wait_mp_active "$2" 20 || fail "not all paths active"
 }

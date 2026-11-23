@@ -31,8 +31,10 @@ echo up > "$HOSTS/$I1/link"; echo up > "$HOSTS/$I2/link"
 H1=$(host_of $I1); H2=$(host_of $I2)
 
 paths() {	# all sd devices of the shared LUN, one per line
-	ls -d /sys/class/scsi_host/{$H1,$H2}/device/rport-*/target*/*/block/* 2>/dev/null |
-		xargs -n1 basename | sort
+	local b
+	for b in /sys/class/scsi_host/{$H1,$H2}/device/rport-*/target*/*/block/*; do
+		[ -e "$b" ] && echo "${b##*/}"
+	done | sort
 }
 wait_paths 4 || fail "expected 4 paths"
 udevadm settle

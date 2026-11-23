@@ -175,8 +175,7 @@ enum fcsim_tmr_state {
 	FCSIM_TMR_RESPONDED,	/* queue_tm_rsp: EH reads it and drops the ACK ref */
 	FCSIM_TMR_ABORTED,	/* aborted_task: LIO drops the ACK ref itself */
 	FCSIM_TMR_ABANDONED,	/* EH gave up waiting; queue_tm_rsp drops the ref */
-	FCSIM_TMR_LOST,		/* queue_tm_rsp under drop=rsp: the FCP_RSP is
-				 * lost; EH times out and drops the ACK ref */
+	FCSIM_TMR_LOST,		/* drop=rsp: answer lost; EH drops the ref */
 };
 
 /*

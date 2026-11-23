@@ -18,6 +18,8 @@
 #                   tree, minus .gitignore'd files; needs rpm-build)
 #   make test-rpm   install that RPM in an AlmaLinux 9 kernel guest (overlay,
 #                   the host stays untouched) and check dkms + tools
+#   make check      fast checks on the host, no VM (scripts/check.sh: shellcheck,
+#                   Python syntax, fcsimctl unit tests, checkpatch)
 #   make clean      also removes rpmbuild/ and .test-out/; works without KDIR
 KDIR ?= $(HOME)/build/linux-6.18
 VERSION := $(shell sed -n 's/^\#define FCSIM_VERSION[[:space:]]*"\(.*\)"/\1/p' src/fcsim.h)
@@ -89,6 +91,9 @@ test-wsl: TESTS += "wsl-try tests/wsl-try-guest.sh"	# needs the WSL2 kernel
 test-wsl: wsl
 	$(run-tests)
 
+check:
+	scripts/check.sh
+
 rpm:
 	mkdir -p rpmbuild/SOURCES
 	git ls-files -z --cached --others --exclude-standard | \
@@ -103,4 +108,4 @@ test-rpm: rpm
 	@test -n "$(EL9_KVER)" || { echo "no AlmaLinux 9 kernel in /lib/modules"; exit 1; }
 	scripts/run-guest-test.sh package tests/package-el9.sh $(VERSION)
 
-.PHONY: all clean kver el9 wsl rpm test test-el9 test-wsl test-rpm
+.PHONY: all check clean kver el9 wsl rpm test test-el9 test-wsl test-rpm
