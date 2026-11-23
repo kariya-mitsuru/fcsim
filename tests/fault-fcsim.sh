@@ -80,6 +80,37 @@ n=$(cat $F/injected); echo "  injected=$n"
 [ "$n" -gt 5 ] && [ "$n" -lt 35 ] || fail "probability looks wrong ($n/40)"
 rmdir "$F"
 
+step "an 'any' rule, and a rule for one target taking precedence over it"
+FA=$HOSTS/$I1/faults/any
+wait_for 10 disk_of "$H1" rd1 || fail "rd1 (T2) missing"
+D2=$(disk_of "$H1" rd1)
+took() {	# took <disk>: ms one 4 KiB READ takes
+	local t0; t0=$(ms)
+	dd if=/dev/"$1" of=/dev/null bs=4k count=1 iflag=direct status=none || fail "READ from $1"
+	echo $(( $(ms) - t0 ))
+}
+mkdir "$FA"; echo 300 > "$FA/delay_ms"
+a=$(took "$D"); b=$(took "$D2")
+echo "  any delay_ms=300: T1 $a ms, T2 $b ms"
+[ "$a" -ge 300 ] && [ "$b" -ge 300 ] || fail "the 'any' rule did not apply to every target"
+# A T1 rule, used up (count=0): it still hides 'any' from T1.
+rule count=0
+a=$(took "$D"); b=$(took "$D2")
+echo "  + T1 rule count=0: T1 $a ms, T2 $b ms"
+[ "$a" -lt 300 ] || fail "the 'any' rule applied despite T1's own rule"
+[ "$b" -ge 300 ] || fail "T2 lost the 'any' rule"
+# Deleting T1's rule makes 'any' apply to T1 again, from the next command on.
+rmdir "$F"
+a=$(took "$D")
+echo "  T1 rule deleted: T1 $a ms"
+[ "$a" -ge 300 ] || fail "the 'any' rule did not apply again after T1's rule went"
+# Changing 'any' takes effect at once as well.
+echo 0 > "$FA/delay_ms"
+a=$(took "$D")
+echo "  any delay_ms=0: T1 $a ms"
+[ "$a" -lt 300 ] || fail "the changed 'any' rule still delays"
+rmdir "$FA"
+
 echo 2 > $DEV/timeout
 echo 2 > $DEV/eh_timeout
 

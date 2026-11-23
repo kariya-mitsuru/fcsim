@@ -88,6 +88,53 @@ $CTL zone mode off
 $CTL zone commit
 expect $I1 "$T1 $T2"; expect $I2 "$T1 $T2"
 
+step "a commit takes a path away under a running writer and gives it back"
+# z1 = I1 T1, z2 = I2 T1 T2: with zoning on, I1 loses T2.
+wait_for 10 disk_of "$H1" rd1 || fail "rd1 missing on I1"
+D=$(disk_of "$H1" rd1)
+udevadm settle
+head -c $((4 << 20)) /dev/urandom > /tmp/pat
+writer_start "/dev/$D" 4
+sleep 0.5
+$CTL zone mode on
+$CTL zone commit
+expect $I1 "$T1"
+sleep 1				# the writer's I/O waits for the path
+$CTL zone mode off
+$CTL zone commit
+expect $I1 "$T1 $T2"
+sleep 0.5
+writer_stop
+wait_for 10 disk_of "$H1" rd1 || fail "rd1 did not come back on I1"
+D=$(disk_of "$H1" rd1)
+dd if="/dev/$D" of=/tmp/pat.rd bs=1M count=4 iflag=direct status=none
+cmp -s /tmp/pat /tmp/pat.rd || fail "data mismatch after the path came back"
+echo "  ok: no write failed, data intact"
+
+step "no RSCN for an initiator whose link is down"
+echo down > "$HOSTS/$I2/link"
+$CTL zone mode on
+events 3 $CTL zone commit | tee /tmp/ev5 | sed 's/^/  /'
+echo "$H1 RSCN $T2PID" > /tmp/ev5.want
+diff -u /tmp/ev5.want /tmp/ev5 || fail "unexpected RSCNs (I2's link is down)"
+$CTL zone mode off
+$CTL zone commit
+echo up > "$HOSTS/$I2/link"
+wait_for 10 sh -c "[ \$(wc -l < $HOSTS/$I2/targets) = 2 ]" || fail "I2 did not log in again"
+expect $I1 "$T1 $T2"; expect $I2 "$T1 $T2"
+
+step "members: duplicates are dropped, an empty list is allowed"
+ZM=/sys/kernel/config/fcsim/zones/zdup
+mkdir $ZM
+echo "$I1 $T1 $I1,$T1" > $ZM/members
+[ "$(wc -l < $ZM/members)" = 2 ] || fail "duplicates kept: $(tr '\n' ' ' < $ZM/members)"
+echo "" > $ZM/members
+[ "$(wc -l < $ZM/members)" = 0 ] || fail "empty member list not taken"
+rmdir $ZM
+$CTL zone revert
+[ "$(cat $Z/pending)" = 0 ] || fail "pending after revert"
+echo "  ok"
+
 step "invalid input"
 if echo "12:34" > /sys/kernel/config/fcsim/zones/z2/members 2>/dev/null; then fail "bad WWPN accepted"; fi
 if mkdir "/sys/kernel/config/fcsim/zones/bad name" 2>/dev/null; then fail "zone name with a space accepted"; fi

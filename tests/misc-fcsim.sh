@@ -71,7 +71,68 @@ assert t["sessions_more"] > 0, t["sessions_more"]
 assert len(t["sessions"]) + t["sessions_more"] == int(sys.argv[1]), t["sessions_more"]
 ' $N || fail "fcsimctl status --json: sessions_more"
 echo "  ok: fcsimctl status counts all $N"
+
+step "port_id exhaustion: 254 ports in all, the next one is refused"
+nports() { echo $(( $(ls -d "$HOSTS"/* | wc -l) + $(ls -d "$LIO"/fcsim/*:* | wc -l) )); }
+i=$N
+while :; do
+	i=$((i + 1))
+	h=$HOSTS/$(printf '10:00:00:00:c9:00:%02x:%02x' $((i / 256)) $((i % 256)))
+	mkdir "$h" 2>/tmp/mkdir.err || break
+	[ $i -lt 400 ] || fail "no limit on the number of ports"
+done
+echo "  refused at $(nports) ports: $(cat /tmp/mkdir.err)"
+[ "$(nports)" = 254 ] || fail "the limit is $(nports) ports, not 254"
+grep -q "No space left" /tmp/mkdir.err || fail "not ENOSPC"
+[ -e "$h" ] && fail "the refused port left a directory behind"
+# A freed port_id is given out again.
+rmdir "$HOSTS/$(printf '10:00:00:00:c9:00:%02x:%02x' 0 1)"
+mkdir "$h" || fail "a freed port_id was not given out again"
 for h in "$HOSTS"/*; do rmdir "$h"; done
+
+step "fcsimctl restore failing part way writes the previous configuration out"
+CTL=$TOP/tools/fcsimctl
+$CTL host create 10:00:00:00:c9:00:aa:01 --link down
+$CTL host create 10:00:00:00:c9:00:aa:02
+$CTL fault set 10:00:00:00:c9:00:aa:02 any delay_ms=7
+$CTL save /tmp/prev.json
+# More hosts than port_ids: valid as a file, refused by the kernel part way.
+python3 -c '
+import json
+hosts = [{"wwpn": "10:00:00:00:c9:01:%02x:%02x" % (i // 256, i % 256), "link": "down"}
+         for i in range(1, 300)]
+json.dump({"version": 1, "hosts": hosts}, open("/tmp/big.json", "w"))'
+rm -f /tmp/big.json.before-restore
+if $CTL restore /tmp/big.json 2>/tmp/restore.err; then fail "restore of 299 hosts succeeded"; fi
+sed 's/^/  /' /tmp/restore.err
+grep -q "restore failed part way" /tmp/restore.err || fail "no 'failed part way'"
+[ -s /tmp/big.json.before-restore ] || fail "the previous configuration was not written out"
+$CTL restore /tmp/big.json.before-restore || fail "restoring the previous configuration failed"
+$CTL save /tmp/now.json
+cmp -s /tmp/prev.json /tmp/now.json || { diff -u /tmp/prev.json /tmp/now.json; fail "not the previous configuration"; }
+echo "  ok: back to the previous configuration"
+
+step "fcsimctl restore refuses unknown keys before touching anything"
+python3 -c '
+import json
+c = json.load(open("/tmp/prev.json"))
+c["hosts"][1]["faults"][0]["delay"] = 100	# misspelt delay_ms
+json.dump(c, open("/tmp/typo.json", "w"))'
+if $CTL restore /tmp/typo.json 2>/tmp/restore.err; then fail "unknown key accepted"; fi
+sed 's/^/  /' /tmp/restore.err
+grep -q "unknown key 'delay'" /tmp/restore.err || fail "the unknown key was not named"
+$CTL save /tmp/now.json
+cmp -s /tmp/prev.json /tmp/now.json || fail "the configuration changed"
+$CTL clear
+
+step "WWPN spelling: only xx:xx:xx:xx:xx:xx:xx:xx in lower case, not all zero"
+for w in 10:00:00:00:C9:00:00:aa 00:00:00:00:00:00:00:00 1000:00:00:c9:00:00:aa: \
+		10-00-00-00-c9-00-00-aa 10:00:00:00:c9:00:00 10:00:00:00:c9:00:00:aa:01 \
+		10:00:00:00:c9:00:00:ag; do
+	if mkdir "$HOSTS/$w" 2>/dev/null; then rmdir "$HOSTS/$w"; fail "host $w accepted"; fi
+	if mkdir "$LIO/fcsim/$w" 2>/dev/null; then rmdir "$LIO/fcsim/$w"; fail "target $w accepted"; fi
+done
+echo "  ok: all refused"
 
 step "tmr_timeout range, TPG name"
 P=/sys/module/tcm_fcsim/parameters/tmr_timeout
