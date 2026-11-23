@@ -246,13 +246,18 @@ LIO
 /sys/kernel/config/fcsim/hosts/<initiator WWPN>/faults/<target WWPN | any>/
   delay_ms      コマンドを target へ届けるまでの遅延
   drop          none | cmd（target に届かない）| rsp（target は実行するが応答が失われる）。
-                TMR も応答なしになる（EH のエスカレーションを試せる）
+                TMR にも同じ意味で効く（cmd: TMR は target に届かない、rsp: target は ABORT TASK /
+                LUN RESET を実行するが応答が失われる）。どちらも EH は tmr_timeout 待って失敗とし、
+                エスカレートする
   error         none | transport (DID_ERROR) | busy | qfull | medium (03/11/00) | aborted (0B/00/00):
                 target に届けず即座にこのエラーを返す
   probability   対象コマンドのうち影響させる割合 %（既定 100）
   count         あと何コマンドに影響させるか（-1 = 無制限、既定）
   injected      (ro) 影響させたコマンド数
 ```
+
+TMR に効くのは `drop` だけで、`delay_ms` と `error` は TMR には適用しない（ルールが `drop=none` なら TMR は
+ルールの対象外で、`count` も消費しない）。
 
 カーネルは仕組みだけを持ち、シナリオ（いつ・どのパスを壊すか）はユーザ空間が組む。
 
@@ -437,7 +442,7 @@ tests/            virtme-ng ゲスト内で実行するテスト（make test の
   smoke-fcsim.sh, smoke-fcsim-targetcli.sh   基本動作、targetcli 連携
   race-fcsim.sh {abort,close,deliver,write-pending}
                                              競合の回帰テスト（dbg_* パラメータで窓を広げる、または EH を演じる）
-  fault-fcsim.sh                             障害注入、fast_io_fail_tmo、RSCN / link イベント（fc-events.py）
+  fault-fcsim.sh                             障害注入（TMR への drop を含む）、fast_io_fail_tmo、RSCN / link イベント（fc-events.py）
   hang-fcsim.sh                              バックエンド停止（dmsetup suspend）時の EH とファブリックの応答性
   multipath-fcsim.sh                         2 iport × 2 tport の dm-multipath フェイルオーバとデータ整合性
                                              （dmsetup で直接組んだマップ）

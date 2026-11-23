@@ -742,8 +742,8 @@ static int fcsim_issue_tmr(struct scsi_device *sdev, u64 tag,
 	fcsim_stat_seq(iport, true, FCSIM_FCP_CMND_LEN);
 
 	if (fcsim_fault_eval(iport, rport->port_name, true, &act) &&
-	    act.drop != FCSIM_DROP_NONE) {
-		/* The fabric loses the TMF: nobody ever answers it. */
+	    act.drop == FCSIM_DROP_CMD) {
+		/* The fabric loses the TMF: it never reaches the target. */
 		fcsim_stat_inc(iport, dumped_frames);
 		sdev_printk(KERN_INFO, sdev, "fault: dropping TMR %d\n", tmr);
 		schedule_timeout_uninterruptible(tmo);
@@ -754,6 +754,11 @@ static int fcsim_issue_tmr(struct scsi_device *sdev, u64 tag,
 	if (!cmd)
 		return TMR_FUNCTION_FAILED;
 	kref_get(&cmd->kref);				/* LIO's, see release_cmd */
+	/* drop=rsp: the target carries the TMF out, its FCP_RSP gets lost. */
+	cmd->drop_rsp = act.drop == FCSIM_DROP_RSP;
+	if (cmd->drop_rsp)
+		sdev_printk(KERN_INFO, sdev,
+			    "fault: the response to TMR %d will be lost\n", tmr);
 
 	rcu_read_lock();
 	nexus = fcsim_nexus_lookup_rcu(iport, rport->port_name);
@@ -785,6 +790,11 @@ static int fcsim_issue_tmr(struct scsi_device *sdev, u64 tag,
 	case FCSIM_TMR_ABORTED:
 		ret = TMR_FUNCTION_REJECTED;
 		break;
+	case FCSIM_TMR_LOST:
+		/* The target answered; the fabric lost the answer. */
+		fcsim_stat_inc(iport, dumped_frames);
+		target_put_sess_cmd(&cmd->se_cmd);	/* our ACK reference */
+		fallthrough;
 	default:
 		sdev_printk(KERN_WARNING, sdev,
 			    "no response to TMR %d within %us\n", tmr,

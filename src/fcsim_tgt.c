@@ -200,7 +200,15 @@ static void fcsim_queue_tm_rsp(struct se_cmd *se_cmd)
 
 	spin_lock_irqsave(&cmd->lock, flags);
 	abandoned = cmd->tmr_state == FCSIM_TMR_ABANDONED;
-	if (!abandoned) {
+	if (abandoned) {
+		/* Too late: EH no longer waits. */
+	} else if (cmd->drop_rsp) {
+		/*
+		 * Fault: the FCP_RSP is lost in the fabric.  EH keeps waiting
+		 * until tmr_timeout and then drops the ACK reference itself.
+		 */
+		cmd->tmr_state = FCSIM_TMR_LOST;
+	} else {
 		cmd->tmr_state = FCSIM_TMR_RESPONDED;
 		complete(&cmd->tmr_done);
 	}

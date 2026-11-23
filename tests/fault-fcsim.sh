@@ -97,14 +97,47 @@ rule drop=rsp count=1
 rd || fail "read after a lost response"
 dmesg | grep -E "ABORT_TASK" | sed 's/^/  /'
 
+# LUN RESETs the target carried out (LIO's scsiLuInResets).
+RESETS=$(ls $LIO/core/rd_mcp_*/rd0/statistics/scsi_lu/resets)
+resets() { cat "$RESETS"; }
+
+# sg_reset opens the disk read-write: its close makes udev probe the disk,
+# and that READ must not be the command a count=1 rule catches.
+step "drop=cmd: a LUN RESET never reaches the target"
+udevadm settle
+rule drop=cmd count=1
+r0=$(resets)
+if sg_reset -N -d /dev/$D >/dev/null 2>&1; then fail "LUN RESET answered despite drop=cmd"; fi
+echo "  target resets: before $r0, after $(resets)"
+[ "$(resets)" = "$r0" ] || fail "a dropped LUN RESET reached the target"
+dmesg | grep -q "fault: dropping TMR" || fail "no 'dropping TMR' in dmesg"
+
+step "drop=rsp: the target carries the LUN RESET out, its response is lost"
+udevadm settle
+rule drop=rsp count=1
+r0=$(resets)
+d0=$(hexval /sys/class/fc_host/$H1/statistics/dumped_frames)
+if sg_reset -N -d /dev/$D >/dev/null 2>&1; then fail "LUN RESET answered despite drop=rsp"; fi
+echo "  target resets: before $r0, after $(resets)"
+[ "$(resets)" = $((r0 + 1)) ] || fail "the LUN RESET did not reach the target"
+[ "$(hexval /sys/class/fc_host/$H1/statistics/dumped_frames)" = $((d0 + 1)) ] ||
+	fail "the lost response was not counted in dumped_frames"
+dmesg | grep -q "no response to TMR" || fail "EH did not time out on the lost response"
+udevadm settle
+rd || fail "read after the LUN RESET"
+splat_check
+
 step "drop=rsp (all, TMRs too): unresponsive target, EH escalates to host reset"
 dmesg -C
 rule drop=rsp
+r0=$(resets)
 if timeout 120 dd if=/dev/$D of=/dev/null bs=4k count=1 iflag=direct status=none; then
 	fail "read succeeded on an unresponsive target?"
 fi
-dmesg | grep -E "dropping TMR|host reset|offline" | sed 's/^/  /' | sort -u -k3 | head -8
+dmesg | grep -E "response to TMR|host reset|offline" | sed 's/^/  /' | sort -u -k3 | head -8
 dmesg | grep -q "host reset: terminated" || fail "no host reset"
+echo "  target resets: before $r0, after $(resets)"
+[ "$(resets)" -gt "$r0" ] || fail "the escalation's LUN RESETs did not reach the target"
 rmdir "$F"
 echo running > $DEV/state
 rd || fail "read after the target came back"
